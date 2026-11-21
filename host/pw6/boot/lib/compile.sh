@@ -33,7 +33,7 @@ CLOG=$SYS/data/.vd-compile.log     # 结果记录（包 过滤器 秒数 结果�
 
 # 当前这个安装（/data/app/<包>-N）的 odex 用的编译过滤器；没有 odex 时输出空
 odex_filter() { # pkg
-    for d in $SYS/data/app/"$1"-*; do
+    for d in $SYS/data/app/$(app_dir "$1"); do
         [ -d "$d" ] || continue
         for o in "$d"/oat/arm/base.odex "$d"/oat/arm64/base.odex; do
             [ -f "$o" ] || continue
@@ -44,7 +44,18 @@ odex_filter() { # pkg
     done
 }
 # 当前安装的代码目录（/data/app/<包>-N 的 N），用来区分“同一个安装编译失败过”和“已经更新成新版本”
-app_dir() { for d in $SYS/data/app/"$1"-*; do [ -d "$d" ] && { echo "${d##*/}"; return 0; }; done; return 1; }
+# 有两个目录时（安装 / 更新途中 Android 被停、Kindle 重启，旧的 <包>-1 没删掉：模拟器 2026-11-20）用 packages.xml 里的 codePath，
+# 不然编译、查 odex、保住 odex（compile_keep_*）都会对着那个没人用的目录
+app_dir() {
+    ad_n=; ad_f=
+    for d in $SYS/data/app/"$1"-*; do [ -d "$d" ] && { ad_n=$((ad_n + 1)); [ -n "$ad_f" ] || ad_f=${d##*/}; }; done
+    [ -n "$ad_f" ] || return 1
+    if [ "$ad_n" -gt 1 ]; then
+        ad_c=$(sed -n "s#.*<package name=\"$1\" codePath=\"/data/app/\([^\"/]*\)\".*#\1#p" $SYS/data/system/packages.xml 2>/dev/null | head -n 1)
+        [ -n "$ad_c" ] && [ -d "$SYS/data/app/$ad_c" ] && ad_f=$ad_c
+    fi
+    echo "$ad_f"
+}
 # 数据区里装的第三方应用（系统应用已经在镜像里预编译）
 data_pkgs() {
     for d in $SYS/data/app/*-[0-9]*; do
@@ -230,6 +241,7 @@ compile_prefault() {
     lowmem_ram && { : > $W/prefault.done; return 0; }
     alive $W/prefault.pid && return 0
     [ "$(mem_avail_mb)" -ge 400 ] || return 0
+    [ -n "$(pgrep dex2oat 2>/dev/null)" ] && return 0     # 编译时不预读（见下面）
     mkdir -p $W/prefault.d 2>/dev/null
     (
         for o in $SYS/data/app/*/oat/arm/base.odex; do
@@ -240,6 +252,10 @@ compile_prefault() {
             [ "${kb:-0}" -ge $(( ${APP_PREFAULT_MB:-64} * 1024 )) ] || { : > "$pd"; continue; }
             [ "$(mem_avail_mb)" -ge 400 ] || exit 0
             [ -f $W/frozen ] || [ -f $W/saver_frozen ] && exit 0
+            # 有 dex2oat 在跑（我们的或 Android 自己的编译）不预读：它本身就要几百 MB，预读进来的页马上又被挤掉；
+            # 正在编的那个包的 odex 编完就换掉了。不记成做完，看门狗下一轮再看
+            [ -n "$(pgrep dex2oat 2>/dev/null)" ] && exit 0
+            [ -f "${o%/*}/.vd-keep.odex" ] && exit 0
             t0=$(cut -d' ' -f1 /proc/uptime)
             ionice -c 3 nice -n 19 cat "$o" > /dev/null 2>&1 || nice -n 19 cat "$o" > /dev/null 2>&1
             : > "$pd"
@@ -536,6 +552,109 @@ compile_babysit() { # cmd 的 pid [包]
         sleep 2
     done
 }
+# 编译期间保住原来的 odex（2026-11-20，PW6 模拟器：刚装好的微信读书 / 番茄在后台编译时打开，
+# ClassNotFoundException / Unable to instantiate application，第二次打开又好了）。Android 7.1 的 installd 每次 dexopt 都先
+# unlink 掉 oat/<isa>/base.odex（和 base.art），再在同一个路径上 O_EXCL 新建、让 dex2oat 往里写；dex2oat 失败 / 被停掉时再按路径
+# unlink 掉没写完的文件。所以整个编译期间（大应用几分钟）以及编译失败 / 被停以后，应用都没有能用的 odex，只能从 apk 现解压 dex、
+# 校验、解释执行（又慢又占内存；模拟器上编译期间这一步还会偶尔校验失败：Bad checksum → 找不到类 → 崩）。
+# 现在：编译前把原来的 odex / art 硬链接一份（.vd-keep.*）；installd 新建的文件一出现就把它也硬链接走（.vd-new.*，dex2oat 继续
+# 通过 fd 往同一个 inode 写），再把原来的那份原子地 rename 回 base.*：应用打开时看到的始终是原来那份完整的 odex。
+# 编成功（cmd 说 Success）才把新的 rename 到 base.*；失败 / 被停 / 超时：installd 按路径删掉的是原来那份的一个名字，
+# 从 .vd-keep 再放回去，没写完的新文件删掉。窗口只剩 installd 新建到看守进程发现之间（≤ 0.2 秒）。
+# 只管 base（本项目里没有分包 apk）；没有原来的 odex（或者它不是完整的 ELF）时和以前一样。
+compile_oat_dir() { # pkg -> 宿主路径 $SYS/data/app/<包>-N/oat/<isa>（已有的那个）
+    cod_d=$(app_dir "$1") || return 1
+    for cod_i in arm arm64; do
+        [ -d "$SYS/data/app/$cod_d/oat/$cod_i" ] && { echo "$SYS/data/app/$cod_d/oat/$cod_i"; return 0; }
+    done
+    return 1
+}
+compile_elf_ok() { [ -s "$1" ] && [ "$(dd if="$1" bs=4 count=1 2>/dev/null | tail -c 3)" = ELF ]; }   # 写完的 oat 才有 ELF 头（dex2oat 最后才写）
+# 编译开始前：把原来的 odex / art 硬链接成 .vd-keep.*。输出要保护的 oat 目录；没有可保的返回 1
+compile_keep_begin() { # pkg
+    ckb_o=$(compile_oat_dir "$1") || return 1
+    rm -f "$ckb_o"/.vd-keep.* "$ckb_o"/.vd-new.* "$ckb_o"/.vd-tmp.* 2>/dev/null
+    compile_elf_ok "$ckb_o/base.odex" || return 1
+    ln -f "$ckb_o/base.odex" "$ckb_o/.vd-keep.odex" 2>/dev/null || return 1
+    [ -f "$ckb_o/base.art" ] && ln -f "$ckb_o/base.art" "$ckb_o/.vd-keep.art" 2>/dev/null
+    echo "$ckb_o"
+}
+# 把 base.<ext> 放回原来那份（.vd-keep.<ext>；没有原来那份就删掉 base.<ext>）。rename 是原子的：打开它的进程要么拿到旧的、要么拿到新的
+compile_keep_put() { # dir ext
+    if [ -f "$1/.vd-keep.$2" ]; then
+        [ "$1/base.$2" -ef "$1/.vd-keep.$2" ] && return 0
+        ln -f "$1/.vd-keep.$2" "$1/.vd-tmp.$2" && mv -f "$1/.vd-tmp.$2" "$1/base.$2"
+    else rm -f "$1/base.$2"; fi
+}
+# installd 新建了 base.<ext>（和原来那份不是一个 inode，也不是已经挪走的那个）：硬链接到 .vd-new.<ext>，base.<ext> 放回原来那份
+compile_keep_divert() { # dir ext
+    [ -f "$1/base.$2" ] || return 1
+    [ -f "$1/.vd-keep.$2" ] && [ "$1/base.$2" -ef "$1/.vd-keep.$2" ] && return 1
+    [ -f "$1/.vd-new.$2" ] && [ "$1/base.$2" -ef "$1/.vd-new.$2" ] && { compile_keep_put "$1" "$2"; return 0; }
+    ln -f "$1/base.$2" "$1/.vd-new.$2" 2>/dev/null || return 1
+    compile_keep_put "$1" "$2"
+}
+# 看守进程（cmd package compile 跑着时在后台）：每 0.2 秒看一次，新建的挪走、原来的放回；已经挪走过而 base.odex 没了（installd 失败
+# 时按路径删的）也马上放回。cmd 结束后按结果收尾（compile_keep_end）。
+compile_keep_guard() { # cmd 的 pid  oat 目录  输出文件
+    while kill -0 "$1" 2>/dev/null; do
+        compile_keep_divert "$2" odex; compile_keep_divert "$2" art
+        [ -f "$2/.vd-new.odex" ] && [ ! -f "$2/base.odex" ] && compile_keep_put "$2" odex
+        usleep 200000 2>/dev/null || sleep 1
+    done
+    compile_keep_end "$2" "$3"
+}
+compile_keep_end() { # oat 目录  输出文件
+    compile_keep_divert "$1" odex; compile_keep_divert "$1" art
+    if grep -q Success "$2" 2>/dev/null && compile_elf_ok "$1/.vd-new.odex"; then
+        # 编成了：新的换上去。这次没有生成 app image（不是按档案编的）就不能留着原来那份 art（它属于原来的 odex）
+        mv -f "$1/.vd-new.odex" "$1/base.odex"
+        if [ -f "$1/.vd-new.art" ]; then mv -f "$1/.vd-new.art" "$1/base.art"; else rm -f "$1/base.art"; fi
+        touch -r "$1/../../base.apk" "$1/base.odex" 2>/dev/null   # installd 的 utime（它按路径改到了原来那份上）
+        t "compile: new odex of ${1#$SYS/data/app/} in place, the old one was kept until it was complete"
+    elif [ -f "$1/.vd-new.odex" ]; then
+        compile_keep_put "$1" odex; compile_keep_put "$1" art
+        t "compile: compile of ${1#$SYS/data/app/} did not finish, the previous odex is back in place"
+    else
+        # installd 根本没有新建（PackageManager 不在、等锁时被停了、不需要编）：确认原来的还在
+        compile_keep_put "$1" odex; [ -f "$1/.vd-keep.art" ] && compile_keep_put "$1" art
+    fi
+    rm -f "$1"/.vd-keep.* "$1"/.vd-new.* "$1"/.vd-tmp.* 2>/dev/null
+}
+# 起一次 cmd package compile（后台）：有原来的 odex 就带看守。设 cp_（cmd 的 pid，给 compile_babysit）和 cpg_（看守的 pid）；
+# 之后调用方 compile_pm_wait 拿返回码（等看守收尾完，之后读到的 odex_filter 才是最终的）
+compile_pm_start() { # pkg 输出文件 cmd 参数...
+    cps_p=$1; cps_out=$2; shift 2
+    cps_o=$(compile_keep_begin "$cps_p")
+    adb_sh "cmd package compile $*" > "$cps_out" 2>&1 &
+    cp_=$!; cpg_=
+    if [ -n "$cps_o" ]; then compile_keep_guard $cp_ "$cps_o" "$cps_out" </dev/null >>$LOG 2>&1 & cpg_=$!; fi
+}
+compile_pm_wait() {
+    wait $cp_; cpw_r=$?
+    [ -n "$cpg_" ] && wait $cpg_
+    return $cpw_r
+}
+# 上一次的工作进程没收尾就没了（停 Android / 宿主脚本被杀）：留下的 .vd-keep / .vd-new 收拾掉。base.odex 是完整的 ELF 就留着
+# （挪走前 / 编完换上的），不是（没了、或者是没写完的新文件）就放回原来那份。正在给这个包编的 dex2oat 还在时不动。
+compile_keep_cleanup() {
+    for ckc_k in $SYS/data/app/*/oat/*/.vd-keep.odex $SYS/data/app/*/oat/*/.vd-new.odex; do
+        [ -f "$ckc_k" ] || continue
+        ckc_o=${ckc_k%/*}; ckc_p=${ckc_o#$SYS/data/app/}; ckc_p=${ckc_p%%/*}; ckc_p=${ckc_p%-*}
+        compile_dex2oat_for "$ckc_p" && continue
+        if [ -f "$ckc_o/.vd-keep.odex" ] && ! { compile_elf_ok "$ckc_o/base.odex" && ! [ "$ckc_o/base.odex" -ef "$ckc_o/.vd-new.odex" ]; }; then
+            compile_keep_put "$ckc_o" odex; compile_keep_put "$ckc_o" art
+            t "compile: ${ckc_o#$SYS/data/app/}: put the previous odex back after an unfinished compile"
+        fi
+        rm -f "$ckc_o"/.vd-keep.* "$ckc_o"/.vd-new.* "$ckc_o"/.vd-tmp.* 2>/dev/null
+    done
+}
+compile_dex2oat_for() { # pkg：有给它编译的 dex2oat / patchoat 在跑
+    for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do
+        tr '\0' '\n' < /proc/$p/cmdline 2>/dev/null | grep -q "/data/app/$1-[0-9]*/" && return 0
+    done
+    return 1
+}
 # 轻量编译（补救用）：没有能用的 odex 时至少回到安装时的状态。也在 babysit 下跑（nice 19、内存保护、应用起了进程就停）。
 # speed 在这台机器上编不完（番茄免费小说 147 MB：PW6 上 speed 超过 520 秒）时，用户用过这个应用、已经有 JIT 档案的话
 # 改编 speed-profile（只编档案里的热点方法）：一台 PW6 测试机实测番茄 194 秒编完，冷启动到主界面从约 2 分钟降到 28 秒。
@@ -543,13 +662,14 @@ compile_babysit() { # cmd 的 pid [包]
 compile_light() { # pkg [timeout]
     if [ "$2" = timeout ] && compile_has_profile "$1" && [ "${COMPILE_PROFILE_FALLBACK:-on}" != off ]; then
         compile_prof_save "$1"
-        adb_sh "cmd package compile -m speed-profile -f $1" >/dev/null 2>&1 &
-        compile_babysit $! "$1"
+        compile_pm_start "$1" $W/compile.light.out -m speed-profile -f "$1"
+        compile_babysit $cp_ "$1"; compile_pm_wait
         compile_prof_back "$1"
-        [ "$(odex_filter "$1")" = speed-profile ] || { adb_sh "cmd package compile -m interpret-only -f $1" >/dev/null 2>&1 & compile_babysit $! "$1"; }
+        # speed-profile 没编成时原来的 odex 还在（compile_keep_*）就留着它；一个也没有才补 interpret-only
+        [ -n "$(odex_filter "$1")" ] || { compile_pm_start "$1" $W/compile.light.out -m interpret-only -f "$1"; compile_babysit $cp_ "$1"; compile_pm_wait; }
     else
-        adb_sh "cmd package compile -m interpret-only -f $1" >/dev/null 2>&1 &
-        compile_babysit $! "$1"
+        compile_pm_start "$1" $W/compile.light.out -m interpret-only -f "$1"
+        compile_babysit $cp_ "$1"; compile_pm_wait
     fi
 }
 # compile.restore 里第一个现在能补的包（不在前台、没有进程在跑、还是没有 odex）：补 interpret-only。
@@ -607,17 +727,16 @@ compile_one() { # pkg mode [force|stale]
         *) adb_sh "setprop dalvik.vm.dex2oat-flags '$oflags --no-watch-dog'" >/dev/null 2>&1 ;; esac
     s=$(cut -d. -f1 /proc/uptime)
     [ "$mode" = speed-profile ] && compile_prof_save "$pkg"
-    adb_sh "cmd package compile -m $mode $cflag $pkg" > $W/compile.out 2>&1 &
-    cp_=$!
+    compile_pm_start "$pkg" $W/compile.out -m $mode $cflag $pkg
     compile_babysit $cp_ "$pkg"
-    wait $cp_; rc=$?
+    compile_pm_wait; rc=$?
     [ "$mode" = speed-profile ] && compile_prof_back "$pkg"
     # stale 不带 -f：PackageManager 只做了它认为需要的（relocation = patchoat）。之后还不是 UpToDate / 过滤器不对才整个重编
     if [ -z "$cflag" ] && [ ! -s $W/compile.abort ] && grep -q Success $W/compile.out && alive $W/pid; then
         if compile_stale_pkgs | grep -q "^$pkg " || ! compile_done_filter "$(odex_filter "$pkg")" "$mode"; then
             t "compile: $pkg still not usable after a plain dexopt, full recompile"
-            adb_sh "cmd package compile -m $mode -f $pkg" > $W/compile.out 2>&1 &
-            cp_=$!; compile_babysit $cp_ "$pkg"; wait $cp_; rc=$?
+            compile_pm_start "$pkg" $W/compile.out -m $mode -f $pkg
+            compile_babysit $cp_ "$pkg"; compile_pm_wait; rc=$?
         fi
     fi
     sec=$(( $(cut -d. -f1 /proc/uptime) - s ))
@@ -644,7 +763,10 @@ compile_one() { # pkg mode [force|stale]
     # 失败时 installd 已经删掉了原来的 odex（pw6-5195 实测：interpret-only 的 odex 没了，应用只能从 apk 里边校验边解释）。
     # 马上（用原来的 dex2oat 参数，线程数仍按上面限制：kt6-5192 上不限时这一步 dex2oat 峰值 150 MB）补一个 interpret-only，
     # 至少回到安装时的状态。也在 babysit 下跑（nice 19、内存保护）。
-    if { [ $r = fail ] || [ $r = timeout ]; } && [ -z "$f" ] && ! compile_held && ! compile_app_running "$pkg"; then
+    # 原来的 odex 编译期间一直保着（compile_keep_*），失败后它还在：只有一个 odex 也没有时才补；超时的大应用有档案、现在又不是
+    # speed-profile 的，照旧马上改编 speed-profile
+    if { [ $r = fail ] || [ $r = timeout ]; } && ! compile_held && ! compile_app_running "$pkg" &&
+       { [ -z "$f" ] || { [ $r = timeout ] && [ "$f" != speed-profile ] && compile_has_profile "$pkg"; }; }; then
         compile_light "$pkg" $r
         t "compile: $pkg restored to $(odex_filter "$pkg")"
     fi
@@ -673,6 +795,7 @@ compile_one() { # pkg mode [force|stale]
 }
 compile_worker() {
     trap 'rm -f $W/compile.pid; rm -rf $W/compile.lock' EXIT
+    compile_keep_cleanup
     idx=$(cat $W/compile.index 2>/dev/null || echo 0); gaveup=
     while [ -s $CQ ]; do
         # 容器没了就结束（stop.sh 也会按 pid 杀掉本进程）

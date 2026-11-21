@@ -61,7 +61,13 @@ au_kmod_mine() {
         done
     fi
     [ -n "$aks" ] || return 0
-    echo "${aks#$VD/kmod/}=$(find "$aks" -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)"
+    # 0.8.14 起包里有 kmod/kmod.files（套件由哪些文件组成）：只算列出的文件，套件目录里多出来的文件不改变编号。
+    # 没有这个文件（0.8.13 装的）就算目录里的全部文件，和 0.8.13 一样（打包时保证两种算法结果相同）。
+    if [ -f "$VD/kmod/kmod.files" ]; then
+        echo "${aks#$VD/kmod/}=$(cd "$VD" && awk -v p="${aks#$VD/}/" 'index($0, p) == 1 && index(substr($0, length(p) + 1), "/") == 0' kmod/kmod.files | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)"
+    else
+        echo "${aks#$VD/kmod/}=$(find "$aks" -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)"
+    fi
 }
 # 点分版本号比较：$1 比 $2 新时返回 0（0.25 > 0.24，0.21.41 > 0.21.9）
 ver_gt() {

@@ -124,7 +124,7 @@ do_exit() {
             cpu_gov_restore 2>/dev/null || true   # android_freeze 切到 powersave 是给屏保用的；回到 Kindle 界面要恢复原来的调速器
             input_release
             wifi_ps_restore 2>/dev/null || true   # 回到 Kindle：Wi-Fi 省电交还 Kindle（WIFI_PS=off / auto 临时关掉的）
-            for f in sleep lipc watchdog; do kill $(cat $W/$f.pid 2>/dev/null) 2>/dev/null; done
+            for f in sleep lipc guard watchdog; do kill $(cat $W/$f.pid 2>/dev/null) 2>/dev/null; done
             type usb_watch_stop >/dev/null 2>&1 && usb_watch_stop   # 回到 Kindle：插线由 Kindle 自己处理
             framework_start
             userstore_check freeze
@@ -204,6 +204,25 @@ helpers_supervise() {
     fi
 }
 
+# 看门狗自己的看守（社区报告：watchdog.pid 只写不读）。看门狗没了（OOM、崩溃、被误杀），命令监听、显示桥 / 触摸前端的重启、
+# Android 退出后的收尾就都没人管了，只能重启 Kindle。start_helpers 起这个循环：每 30 秒看一眼，Android 还活着、没冻结、
+# 没有 stop.sh 在跑时把看门狗拉起来（每次运行最多 5 次）。冻结（do_exit 有意停掉看门狗）、Android 没了、正在停止 / 重启时自己退出；
+# stop.sh 和 do_exit 按 guard.pid 停它，解冻时 start_helpers 重起。
+wd_guard() {
+    wg_n=0
+    while :; do
+        sleep ${WD_GUARD_S:-30}
+        kill -0 "$P" 2>/dev/null || break
+        [ -f $W/frozen ] || [ -f $W/restarting ] && break
+        wg_s=$(cat /tmp/veradroid-stop.pid 2>/dev/null); [ -n "$wg_s" ] && kill -0 "$wg_s" 2>/dev/null && break
+        alive $W/watchdog.pid && continue
+        [ $wg_n -ge 5 ] && { t "guard: watchdog gone again after $wg_n restarts, giving up"; break; }
+        wg_n=$((wg_n + 1))
+        t "guard: watchdog (pid $(cat $W/watchdog.pid 2>/dev/null)) is gone, restarting it ($wg_n/5)"
+        watchdog &
+        echo $! > $W/watchdog.pid
+    done
+}
 watchdog() {
     # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
     # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).

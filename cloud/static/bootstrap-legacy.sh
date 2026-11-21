@@ -247,7 +247,7 @@ vd_unlock() { [ "$(cat "$INSTALL_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0; r
 # 临时目录（整包 + 解开的 ~290 MB）和安装锁就留到下一次安装（老机型存储小）。先删临时目录、放锁，再做别的。
 vd_cleanup() { set +eu; type syncer_off >/dev/null 2>&1 && syncer_off; vd_kill_users "$TMP"; rm -rf "$TMP"
     [ -d "$TMP" ] && { sleep 1; vd_kill_users "$TMP"; rm -rf "$TMP"; }; vd_unlock
-    [ -n "${KEEPAWAKE:-}" ] && lipc-set-prop com.lab126.powerd preventScreenSaver "$KEEPAWAKE" >/dev/null 2>&1; return 0; }
+    [ -n "${KEEPAWAKE:-}" ] && lipc-set-prop com.lab126.powerd preventScreenSaver "$KEEPAWAKE" >/dev/null 2>&1 && rm -f /mnt/base-us/veradroid/state/keepawake.orig; return 0; }
 if ! mkdir "$INSTALL_LOCK" 2>/dev/null; then
     lp=$(cat "$INSTALL_LOCK/pid" 2>/dev/null || true); lb=$(cat "$INSTALL_LOCK/boot" 2>/dev/null || true)
     # 锁在 /mnt/base-us 上，断电后还在：只认本次开机（boot_id 相同）里还活着的持有者
@@ -285,8 +285,17 @@ for old_tmp in /mnt/base-us/veradroid/state/install.[0-9]*; do
     rm -rf "/mnt/base-us/veradroid/state/install.$op" 2>/dev/null || true
 done
 
+# 在 Android 里点的更新、Android 还在前台（下载阶段）：不往屏幕上写 eips（会写在 Android 的画面上，PW4 模拟器截图里“VeraDroid”压在桌面标题上）；
+# 这时进度在 VeraHome 的卡片里（update.status）
+vd_android_front() { [ "${VD_FROM_HOME:-0}" = 1 ] && [ -f "$W/pid" ] && [ ! -f "$W/frozen" ] && kill -0 "$(cat "$W/pid" 2>/dev/null)" 2>/dev/null; }
+# 一行提示的中文部分（“English / 中文”取斜杠后面；没有斜杠就是整句）：整屏进度画面和 VeraHome 的进度卡片用
+vd_zh() { case "$*" in *" / "*) printf '%s' "${*#* / }" ;; *) printf '%s' "$*" ;; esac; }
 show() {
     printf '%s\n' "$*"
+    # 进度状态（update.status，VeraHome 的卡片）每条提示都更新；整屏进度画面在时提示画在画面里，不再用 eips 写在顶上
+    type vp_progress >/dev/null 2>&1 && vp_progress "${VP_PCT:--1}" "$(vd_zh "$*")" "${VP_L2:-}"
+    [ -n "${VP_ON:-}" ] && return 0
+    vd_android_front && return 0
     if command -v eips >/dev/null 2>&1; then
         # eips 没有中文字形：中文字节画出来是乱码，叠在上一行没擦掉的尾巴上（Oasis 3 用户照片：“Backup / ▪ books (3143 MB)…”
         # 后面一片乱码）。只画英文：“English / 中文”取斜杠前一半，否则去掉非 ASCII；剩下不到 4 个字母的（纯中文的提示）不画，
@@ -307,6 +316,14 @@ progress_line() { # pct label
     empty=$((20 - fill))
     bar=$(printf '%*s' "$fill" '' | tr ' ' '#')
     pad=$(printf '%*s' "$empty" '' | tr ' ' '-')
+    if [ -n "${VP_ON:-}" ] || [ -n "${VP_STATUS:-}" ]; then
+        printf '%s\n' "$2 ${pct}% [${bar}${pad}]"
+        vp_progress "$pct" "$(vd_zh "$2")" "${VP_L2:-}"
+        [ -n "${VP_ON:-}" ] && return 0
+        vd_android_front && return 0
+        command -v eips >/dev/null 2>&1 && { se=$(printf '%s' "${2%% / *} ${pct}% [${bar}${pad}]" | tr -cd ' -~' | cut -c1-60); eips 1 3 "$(printf '%-60s' "$se")" >/dev/null 2>&1 || true; }
+        return 0
+    fi
     show "$2 ${pct}% [${bar}${pad}]"
 }
 # 与 boot/lib/common.sh 的 loop_mount 相同：有的机型（KT6）只有 /dev/loop/N 节点，mount -o loop 会失败
@@ -342,9 +359,14 @@ loop_mount() { # img dir
     return 1
 }
 die() {
-    show "安装失败：$*"
-    show "请检查 Wi-Fi / 空间，然后按电源键回到原生后重试"
-    sleep 8
+    # 2026-11-20：以前只有“安装失败：…”这一句中文（eips 画不出中文，屏幕上还是上一行英文的“Backup …”），
+    # 在 Android 里点的更新失败后 Android 又自己起来，用户看到的只是“没更新上”。现在：英文一句画在屏幕上（没有整屏画面时）、
+    # 整屏画面在时画出错画面，结果记进 state/update.result，Android 重新起来后写给 VeraHome（vd_guard）。
+    show "Update/install failed, nothing changed / 安装失败：$*"
+    vd_result error "${DIE_CODE:-14}" "更新没有装上" "$*"
+    type vp_error >/dev/null 2>&1 && vp_error "${DIE_CODE:-14}" "更新没有装上" "$*"
+    [ -n "${VP_ON:-}" ] || show "请检查 Wi-Fi / 空间，然后按电源键回到原生后重试"
+    if [ -n "${VP_ON:-}" ]; then sleep 15; else sleep 8; fi
     exit 1
 }
 
@@ -404,13 +426,514 @@ restore_missing() { # backup.tgz destdir
 # 2026-11-10 数据安全（在 eink-emulator 里复现 / 排除过）
 vlog() { echo "[$(date '+%F %T')] $*" >> /mnt/base-us/veradroid/logs/install-detail.log 2>/dev/null || true; }
 fsize() { { wc -c < "$1"; } 2>/dev/null | tr -d ' ' || true; }
+# 整屏进度画面（方块风格，和新机型安装器、老机型宿主的开机画面同一份代码：host/pw6/boot/lib/progress.sh，tools/sync-progress.sh 同步）。
+# 2026-11-20 老机型“在 Android 里点更新”：以前这里是几个只写一行 eips 英文的空壳，用户回到 Kindle 只看到一行“Backup …”，
+# 中文的失败原因（eips 画不出中文）一个字都看不到，安装器退出后 Android 又自己起来了，像是“点了更新什么都没发生”。
+# 现在：手动更新（不是后台自动更新）停掉 Android 以后画整屏进度（vd_vp_show），每一步的状态也写进 $W/kfb/ctl/update.status
+# 给 VeraHome 的进度卡片（Android 还在跑的下载阶段看得到）；失败时画出错画面，并在 Android 重新起来后把原因写回给 VeraHome。
+# BEGIN vd_progress
+# “方块”风格的进度画面（安装器、开机画面、回到 Kindle 共用；docs/progress-ui.md）。同一份代码在 cloud/static/bootstrap.sh 里
+# 也有一份（# BEGIN vd_progress … # END vd_progress 之间，两份必须一样：tools/sync-progress.sh 从这里拷过去）。
+# 白底；双线黑框 + 右下实心投影的标题框；黑底白字标题条；英文小字在中文粗体标题上面；方块进度条（一排方格，完成的涂黑）；粗体数字。
+# 用 FBInk 命令行画（-k 画矩形、-t 用 Kindle 自带的 TTF 写字、-s 局部刷新）；没有能用的 FBInk（或它的刷新被驱动拒绝，
+# Scribe 上 FBInk 不认识的机型）就退回 eips 一行行写字。墨水屏每刷一次都看得见：只在有变化时刷，
+# 方格只补新涂黑的那几格，文字至少 5 秒才刷一次（vp_progress 的节流），整屏闪刷只在画面第一次出现时一次。
+# 写给 VeraHome 看的状态文件（VP_STATUS，KEY=value，一行一个，先写 .tmp 再 mv）最多一秒一次。
+# 本文件要在 set -eu 下也能用：变量都带默认值，失败的命令都不让它返回非 0。
+VP_FB=; VP_MODE=none; VP_W=0; VP_H=0; VP_REF=0; VP_ON=; VP_STATUS=${VP_STATUS:-}
+VP_TITLE="VeraDroid"; VP_CAPS="VERADROID"; VP_SUB=""; VP_FOOT=""; VP_STEPS=""; VP_CUR=""; VP_CUR_LABEL=""
+VP_T0=$(date +%s); VP_ST0=$VP_T0; VP_LASTDRAW=0; VP_LASTST=0; VP_CELLS=-1; VP_PCT=-1; VP_L1=""; VP_L2=""; VP_DL1=""; VP_DL2=""; VP_KV=""
+VP_N=20     # 方格数
+vp_log() { :; }
+vp_label() {
+    case "$1" in
+        net) echo "检查网络" ;; dl) echo "下载安装包" ;; copy) echo "读取离线包" ;; verify) echo "校验安装包" ;;
+        backup) echo "备份书库" ;; disk) echo "建系统盘" ;; unpack) echo "解压安装包" ;; install) echo "安装系统" ;; boot) echo "首次开机" ;;
+        kindle) echo "恢复 Kindle 界面" ;; android) echo "启动 Android" ;; apps) echo "优化应用" ;; *) echo "$1" ;;
+    esac
+}
+vp_caps() {
+    case "$1" in
+        net) echo "NETWORK CHECK" ;; dl) echo "DOWNLOAD" ;; copy) echo "OFFLINE PACKAGE" ;; verify) echo "VERIFY" ;;
+        backup) echo "BACKUP" ;; disk) echo "SYSTEM DISK" ;; unpack) echo "UNPACK" ;; install) echo "INSTALL" ;; boot) echo "FIRST BOOT" ;;
+        kindle) echo "BACK TO KINDLE" ;; android) echo "STARTING ANDROID" ;; apps) echo "OPTIMIZING APPS" ;; *) echo "" ;;
+    esac
+}
+# 状态文件里的 state（VeraHome 按它显示步骤）
+vp_state() {
+    case "$1" in net) echo checking ;; dl|copy) echo downloading ;; verify) echo verifying ;; unpack) echo unpacking ;;
+        backup|disk|install) echo installing ;; boot) echo booting ;; *) echo "$1" ;; esac
+}
 vp_now() { date +%s; }
+vp_mmss() { s=${1:-0}; [ "$s" -ge 0 ] 2>/dev/null || s=0; if [ "$s" -ge 3600 ]; then printf '%d:%02d:%02d' $((s / 3600)) $((s % 3600 / 60)) $((s % 60)); else printf '%d:%02d' $((s / 60)) $((s % 60)); fi; }
 vp_mb() { b=${1:-0}; printf '%d.%d' $((b / 1048576)) $(( (b % 1048576) * 10 / 1048576 )); }
-# 老机型安装器没有新安装器的整屏进度画面（vp_*）：下面两块共用代码（vd_dl、vd_parts，和 bootstrap.sh 一字不差）用到的几个
-# 画面 / 错误代码函数在这里换成 show 一行字
+vp_rate() { b=${1:-0}; if [ "$b" -ge 1048576 ]; then echo "$(vp_mb "$b") MB/s"; else echo "$((b / 1024)) KB/s"; fi; }
+
+# ---- 字体 / FBInk ----
+vp_font() { for f in "$@"; do [ -f "$f" ] && { echo "$f"; return 0; }; done; echo ""; }
+VPF=/usr/java/lib/fonts
+VP_FZB=$(vp_font $VPF/STHeitiBold.ttf $VPF/STHeitiMedium.ttf "${VD:-/mnt/base-us/veradroid}/fonts/DroidSansFallback.ttf")
+VP_FZR=$(vp_font $VPF/STHeitiMedium.ttf $VPF/STHeitiBold.ttf "${VD:-/mnt/base-us/veradroid}/fonts/DroidSansFallback.ttf")
+VP_FEN=$(vp_font $VPF/Amazon-Ember-Bold.ttf $VPF/AmazonEmberBold-Bold.ttf $VPF/Amazon-Ember-Medium.ttf)
+[ -n "$VP_FEN" ] || VP_FEN=$VP_FZB
+# 找一个能跑的 FBInk：每个候选真的跑一次 -e（KT6 上越狱自带的那个会段错误）。$@ = 额外的候选（放在前面）
+vp_fb_find() {
+    for f in "$@" "${VD:-/mnt/base-us/veradroid}/bin/fbink" /mnt/us/libkh/bin/fbink /mnt/us/koreader/fbink /usr/bin/fbink /usr/local/bin/fbink; do
+        [ -n "$f" ] && [ -x "$f" ] || continue
+        e=$("$f" -e 2>/dev/null) || continue
+        w=$(printf '%s' "$e" | tr ';' '\n' | sed -n 's/^viewWidth=//p' | head -1)
+        h=$(printf '%s' "$e" | tr ';' '\n' | sed -n 's/^viewHeight=//p' | head -1)
+        [ "${w:-0}" -gt 300 ] 2>/dev/null && [ "${h:-0}" -gt 300 ] 2>/dev/null || continue
+        VP_FB=$f; VP_W=$w; VP_H=$h
+        return 0
+    done
+    return 1
+}
+vp_sc() { echo $(( $1 * VP_W / 1272 )); }
+vp_r() { "$VP_FB" -q -b -B "$5" -k "top=$2,left=$1,width=$3,height=$4" >/dev/null 2>&1 || true; }   # x y w h BLACK|WHITE
+# x y w h px font fg bg center(0/1) text：先用背景色清掉这块，再写字（可以多行）
+vp_t() {
+    vp_r "$1" "$2" "$3" "$4" "$8"
+    [ -n "${10:-}" ] && [ -n "$6" ] || return 0
+    m=; [ "$9" = 1 ] && m=-m
+    "$VP_FB" -q -b $m -C "$7" -B "$8" -O -t "regular=$6,px=$5,top=$2,bottom=$((VP_H - $2 - $4)),left=$1,right=$((VP_W - $1 - $3))" "${10}" >/dev/null 2>&1 || true
+}
+vp_ref() { # x y w h [waveform]：局部刷新（不闪）
+    VP_REF=$((VP_REF + 1))
+    "$VP_FB" -q -W "${5:-GL16}" -s "top=$2,left=$1,width=$3,height=$4" >/dev/null 2>&1 || true
+}
+# 双线框 + 投影：x y w h（w/h 含投影）
+vp_frame() {
+    sh_=$(vp_sc 9); st_=$(vp_sc 4); [ $st_ -ge 2 ] || st_=2; in_=$(vp_sc 11); is_=$(vp_sc 2); [ $is_ -ge 1 ] || is_=1
+    vp_r $(($1 + sh_)) $(($2 + sh_)) $(($3 - sh_)) $(($4 - sh_)) BLACK
+    vp_r "$1" "$2" $(($3 - sh_)) $(($4 - sh_)) BLACK
+    vp_r $(($1 + st_)) $(($2 + st_)) $(($3 - sh_ - 2 * st_)) $(($4 - sh_ - 2 * st_)) WHITE
+    if [ "${5:-0}" = 1 ]; then
+        vp_r $(($1 + in_)) $(($2 + in_)) $(($3 - sh_ - 2 * in_)) $(($4 - sh_ - 2 * in_)) BLACK
+        vp_r $(($1 + in_ + is_)) $(($2 + in_ + is_)) $(($3 - sh_ - 2 * in_ - 2 * is_)) $(($4 - sh_ - 2 * in_ - 2 * is_)) WHITE
+    fi
+}
+# 版面（按 1272 宽的 PW6 定，其余按宽度等比；四种屏幕的宽高比都在 0.73–0.75，竖向同样按宽度缩）
+vp_geom() {
+    G_M=$(vp_sc 64); G_BW=$((VP_W - 2 * G_M)); G_SH=$(vp_sc 9); G_ST=$(vp_sc 4); [ $G_ST -ge 2 ] || G_ST=2
+    G_HY=$(vp_sc 100); G_HH=$(vp_sc 240)
+    G_SY=$(vp_sc 380); G_SHH=$(vp_sc 610)
+    G_LY=$(vp_sc 1030); G_RH=$(vp_sc 60)
+    G_PAD=$(vp_sc 36)
+    G_BARY=$((G_SY + $(vp_sc 232))); G_BARH=$(vp_sc 62)
+    G_BX=$((G_M + G_PAD)); G_BARW=$((G_BW - G_SH - 2 * G_PAD))
+    G_GAP=$(vp_sc 8); G_CW=$(( (G_BARW - G_GAP * (VP_N - 1)) / VP_N ))
+    G_PCTX=$((G_M + G_BW - G_SH - G_PAD - $(vp_sc 240))); G_PCTY=$((G_SY + $(vp_sc 104))); G_PCTW=$(vp_sc 240); G_PCTH=$(vp_sc 112)
+    G_I1Y=$((G_SY + $(vp_sc 318))); G_I1H=$(vp_sc 58)
+    G_I2Y=$((G_SY + $(vp_sc 388))); G_I2H=$(vp_sc 190)
+    G_IX=$G_BX; G_IW=$G_BARW
+}
+vp_cell() { # i filled(0/1)
+    x=$((G_BX + $1 * (G_CW + G_GAP))); b=$(vp_sc 4); [ $b -ge 2 ] || b=2
+    vp_r $x $G_BARY $G_CW $G_BARH BLACK
+    [ "$2" = 1 ] || vp_r $((x + b)) $((G_BARY + b)) $((G_CW - 2 * b)) $((G_BARH - 2 * b)) WHITE
+}
+vp_bar_all() { i=0; while [ $i -lt $VP_N ]; do f=0; [ $i -lt "${1:-0}" ] && f=1; vp_cell $i $f; i=$((i + 1)); done; }
+vp_idx() { i=1; for s in $VP_STEPS; do [ "$s" = "$1" ] && { echo $i; return; }; i=$((i + 1)); done; echo 0; }
+vp_nsteps() { set -- $VP_STEPS; echo $#; }
+# 步骤列表的一行：id 状态（done / cur / todo）
+vp_row() {
+    i=$(vp_idx "$1"); y=$((G_LY + $(vp_sc 66) + (i - 1) * G_RH)); x=$((G_M + G_ST + $(vp_sc 6))); w=$((G_BW - G_SH - 2 * G_ST - $(vp_sc 12)))
+    sq=$(vp_sc 30); sx=$((G_M + $(vp_sc 40))); sy=$((y + (G_RH - sq) / 2)); tx=$((G_M + $(vp_sc 96)))
+    if [ "$2" = cur ]; then
+        vp_r $x $((y + 2)) $w $((G_RH - 4)) BLACK
+        vp_r $((sx + $(vp_sc 6))) $((sy + $(vp_sc 6))) $((sq - $(vp_sc 12))) $((sq - $(vp_sc 12))) WHITE
+        vp_t $tx $((y + $(vp_sc 8))) $((w - tx + x - $(vp_sc 10))) $((G_RH - $(vp_sc 16))) $(vp_sc 34) "$VP_FZB" WHITE BLACK 0 "$(vp_label "$1")  ·  正在进行"
+    else
+        vp_r $x $((y + 2)) $w $((G_RH - 4)) WHITE
+        vp_r $sx $sy $sq $sq BLACK
+        b=$(vp_sc 4); [ $b -ge 2 ] || b=2
+        [ "$2" = done ] || vp_r $((sx + b)) $((sy + b)) $((sq - 2 * b)) $((sq - 2 * b)) WHITE
+        t="$(vp_label "$1")"; [ "$2" = done ] && t="$t  ·  完成"
+        f=$VP_FZR; [ "$2" = done ] && f=$VP_FZB
+        vp_t $tx $((y + $(vp_sc 8))) $((w - tx + x - $(vp_sc 10))) $((G_RH - $(vp_sc 16))) $(vp_sc 32) "$f" BLACK WHITE 0 "$t"
+    fi
+}
+vp_rows() { past=1; [ "$(vp_idx "$VP_CUR")" -gt 0 ] || past=; for s in $VP_STEPS; do if [ "$s" = "$VP_CUR" ]; then vp_row $s cur; past=; elif [ -n "$past" ]; then vp_row $s done; else vp_row $s todo; fi; done; }
+# 步骤框（标题条 + 英文小字 + 步骤名 + 百分比 + 方格 + 两块说明文字）
+vp_stepbox() {
+    bx=$G_M; by=$G_SY; bw=$G_BW
+    vp_r $((bx + G_ST)) $((by + G_ST)) $((bw - G_SH - 2 * G_ST)) $((G_SHH - G_SH - 2 * G_ST)) WHITE
+    n=$(vp_nsteps); i=$(vp_idx "$VP_CUR")
+    hd="第 $i 步 / 共 $n 步"; [ "$i" = 0 ] && hd="${VP_HEAD:-请稍候}"
+    vp_t $((bx + G_ST)) $((by + G_ST)) $((bw - G_SH - 2 * G_ST)) $(vp_sc 62) $(vp_sc 32) "$VP_FZB" WHITE BLACK 1 "$hd"
+    vp_t $G_BX $((by + $(vp_sc 92))) $(vp_sc 700) $(vp_sc 34) $(vp_sc 24) "$VP_FEN" BLACK WHITE 0 "$(vp_caps "$VP_CUR")"
+    vp_t $G_BX $((by + $(vp_sc 126))) $((G_PCTX - G_BX)) $(vp_sc 90) $(vp_sc 66) "$VP_FZB" BLACK WHITE 0 "$VP_CUR_LABEL"
+    VP_CELLS=-1; VP_PCT=-1; VP_DL1=; VP_DL2=
+}
+# 整屏画一次（第一次出现 / 步骤变了而画面可能被别人盖掉时）：闪刷一次
+vp_screen() {
+    [ "$VP_MODE" = fb ] || return 0
+    vp_geom
+    vp_r 0 0 "$VP_W" "$VP_H" WHITE
+    vp_frame $G_M $G_HY $G_BW $G_HH 1
+    in_=$(vp_sc 34)
+    vp_t $((G_M + in_)) $((G_HY + $(vp_sc 36))) $((G_BW - 2 * in_ - G_SH)) $(vp_sc 34) $(vp_sc 24) "$VP_FEN" BLACK WHITE 0 "$VP_CAPS"
+    vp_t $((G_M + in_)) $((G_HY + $(vp_sc 72))) $((G_BW - 2 * in_ - G_SH)) $(vp_sc 84) $(vp_sc 60) "$VP_FZB" BLACK WHITE 0 "$VP_TITLE"
+    vp_t $((G_M + in_)) $((G_HY + $(vp_sc 162))) $((G_BW - 2 * in_ - G_SH)) $(vp_sc 44) $(vp_sc 28) "$VP_FZR" BLACK WHITE 0 "$VP_SUB"
+    vp_frame $G_M $G_SY $G_BW $G_SHH 0
+    vp_stepbox
+    if [ -n "$VP_STEPS" ]; then
+        n=$(vp_nsteps); lh=$(( $(vp_sc 66) + n * G_RH + $(vp_sc 26) ))
+        vp_frame $G_M $G_LY $G_BW $lh 0
+        vp_t $((G_M + G_ST)) $((G_LY + G_ST)) $((G_BW - G_SH - 2 * G_ST)) $(vp_sc 56) $(vp_sc 28) "$VP_FZB" WHITE BLACK 1 "步骤"
+        vp_rows
+        fy=$((G_LY + lh + $(vp_sc 22)))
+    else
+        fy=$((G_SY + G_SHH + $(vp_sc 30)))
+    fi
+    [ -n "$VP_FOOT" ] && vp_t $G_M $fy $G_BW $(vp_sc 90) $(vp_sc 26) "$VP_FZR" BLACK WHITE 1 "$VP_FOOT"
+    VP_REF=$((VP_REF + 1))
+    if ! "$VP_FB" -q -f -s >/dev/null 2>&1; then
+        # 刷新被驱动拒绝（Scribe：FBInk 不认识这台机器，MTK 驱动不收它的刷新）：退回 eips
+        VP_MODE=eips; vp_log "progress: fbink refresh rejected, eips fallback"; vp_eips_all; return 0
+    fi
+    VP_ON=1; VP_LASTDRAW=$(vp_now)
+}
+# ---- eips 退路：几行字（每行先补空格盖掉上一次的字） ----
+vp_eips() { command -v eips >/dev/null 2>&1 && { eips 1 "$1" "$(printf '%-46s' "$2")" >/dev/null 2>&1 || true; }; return 0; }
+vp_ebar() { n=$(( ${1:-0} * 20 / 100 )); b=$(printf '%*s' $n '' | tr ' ' '#'); p=$(printf '%*s' $((20 - n)) '' | tr ' ' '-'); echo "[$b$p] ${1:-0}%"; }
+vp_eips_all() {
+    # eips 只有 ASCII 字形（中文字符它画不出来：“paint_char> character not available”），这里全用英文
+    i=$(vp_idx "$VP_CUR"); n=$(vp_nsteps)
+    vp_eips 2 "$VP_CAPS"
+    vp_eips 4 "[$i/$n] $(vp_caps "$VP_CUR")"
+    [ "$VP_PCT" -ge 0 ] 2>/dev/null && vp_eips 5 "$(vp_ebar $VP_PCT)" || vp_eips 5 ""
+    vp_eips 6 "$(vp_ascii "$VP_L1")"
+    if [ -n "${VP_EN2:-}" ]; then vp_eips 7 "$VP_EN2"; else vp_eips 7 "$(vp_ascii "$VP_L2" | head -c 46)"; fi
+    VP_LASTDRAW=$(vp_now)
+}
+vp_ascii() { printf '%s' "$1" | head -1 | sed 's/剩余/left/g; s/已用/elapsed/g; s/·/|/g; s/速度/speed/g; s/正常/ok/g; s/很慢/slow/g; s/一般要/usually/g; s/左右//g' | tr -cd ' -~' | sed 's/  */ /g'; }
+vp_en_err() {
+    case "$1" in 11|12|13) [ -n "${NC_EN:-}" ] && { echo "$NC_EN"; return 0; } ;; esac   # vp_netcheck 说得更具体
+    case "$1" in
+        11) echo "No Wi-Fi. Connect in Kindle settings, then tap install again." ;;
+        12) echo "Wi-Fi is on but no internet (DNS failed). Network problem." ;;
+        13) echo "Cannot reach the VeraDroid server (blocked/maintenance). Network problem; try another network or the offline package." ;;
+        14) echo "Network too slow, download timed out. Tap install again to resume, or use the offline package." ;;
+        15) echo "Download corrupted twice (checksum). Try another network." ;;
+        21) echo "Not enough storage. Free some space and tap install again." ;;
+        *) echo "Device-side error. Restart the Kindle and try again; log: veradroid/logs/install.log" ;;
+    esac
+}
+# ---- 对外 ----
+# vp_begin 标题 英文小字 副标题 页脚 步骤表 [fbink 候选…]：选好画法（不画）
+vp_begin() {
+    VP_TITLE=$1; VP_CAPS=$2; VP_SUB=$3; VP_FOOT=$4; VP_STEPS=$5; shift 5
+    VP_T0=$(vp_now)
+    if vp_fb_find "$@" && [ -n "$VP_FZB" ]; then VP_MODE=fb
+    elif command -v eips >/dev/null 2>&1; then VP_MODE=eips
+    else VP_MODE=none; fi
+    [ "${VP_FORCE_EIPS:-0}" = 1 ] && VP_MODE=eips
+    return 0
+}
+# vp_show：让画面出现（安装器在 Android 还在前台时先不画，停掉 Android 后再调）
+vp_show() {
+    VP_ON=1
+    case "$VP_MODE" in fb) vp_screen ;; eips) vp_eips_all ;; esac
+    return 0
+}
+# 换了一个可用的 FBInk（安装包里解出来的）：从 eips 升级到整屏方块画面
+vp_upgrade() {
+    [ "$VP_MODE" = fb ] && return 0
+    [ "${VP_FORCE_EIPS:-0}" = 1 ] && return 0
+    vp_fb_find "$@" && [ -n "$VP_FZB" ] || return 0
+    VP_MODE=fb; vp_log "progress: upgraded to fbink $VP_FB"
+    [ -n "$VP_ON" ] && vp_screen
+    return 0
+}
+# KEY=value 文件（一行一个；值里的换行写成 \n 两个字符，VeraHome 读的时候换回来），先写 .tmp 再 mv
+vp_kvw() {
+    kf=$1; shift
+    [ -n "$kf" ] && [ -d "$(dirname "$kf")" ] || return 0
+    { for a in "$@"; do printf '%s\n' "$a" | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 } END { print "" }'; done
+      echo "time=$(date +%s)"; } > "$kf.tmp" 2>/dev/null && chmod 644 "$kf.tmp" 2>/dev/null && mv -f "$kf.tmp" "$kf" 2>/dev/null   # 桌面（普通应用 uid）要能读：安装器的 umask 可能是 077
+    return 0
+}
+vp_status() { # 写状态文件（KEY=value…）；VP_KV 里是这一步固定带上的键
+    [ -n "$VP_STATUS" ] || return 0
+    vp_kvw "$VP_STATUS" "$@" $VP_KV "elapsed=$(( $(vp_now) - VP_T0 ))"
+    VP_LASTST=$(vp_now); return 0
+}
+# vp_step id [第一行说明]：进入新的一步。整屏画面在：只重画步骤框和列表里变了的两行
+vp_step() {
+    type vlog >/dev/null 2>&1 && vlog "step $1: up=$(cut -d' ' -f1 /proc/uptime 2>/dev/null) memavail=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)MB boot=$(cut -c1-8 /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    prev=$VP_CUR; VP_CUR=$1; VP_CUR_LABEL=$(vp_label "$1"); VP_ST0=$(vp_now); VP_L1=${2:-}; VP_L2=${3:-}; VP_PCT=-1
+    vp_status "state=$(vp_state "$1")" "step=$1" "label=$VP_CUR_LABEL" "index=$(vp_idx "$1")" "steps=$(echo $VP_STEPS | tr ' ' ',')"
+    [ -n "$VP_ON" ] || return 0
+    case "$VP_MODE" in
+        fb)
+            vp_stepbox
+            [ -n "$VP_L1" ] && vp_t $G_IX $G_I1Y $G_IW $G_I1H $(vp_sc 36) "$VP_FZB" BLACK WHITE 0 "$VP_L1"
+            [ -n "$VP_L2" ] && vp_t $G_IX $G_I2Y $G_IW $G_I2H $(vp_sc 30) "$VP_FZR" BLACK WHITE 0 "$VP_L2"
+            VP_DL1=$VP_L1; VP_DL2=$VP_L2
+            vp_ref $G_M $G_SY $G_BW $G_SHH GC16
+            if [ -n "$VP_STEPS" ]; then
+                # 只重画变了的几行：上一步（变成“完成”）到这一步之间
+                pi=$(vp_idx "$prev"); ci=$(vp_idx "$VP_CUR"); [ "$pi" -gt 0 ] || pi=1
+                for s in $VP_STEPS; do
+                    si=$(vp_idx "$s")
+                    if [ "$si" -eq "$ci" ]; then vp_row $s cur
+                    elif [ "$si" -ge "$pi" ] && [ "$si" -lt "$ci" ]; then vp_row $s done
+                    elif [ "$si" -gt "$ci" ] && [ "$si" -le "$pi" ]; then vp_row $s todo
+                    fi
+                done
+                n=$(vp_nsteps); vp_ref $G_M $G_LY $G_BW $(( $(vp_sc 66) + n * G_RH + $(vp_sc 26) )) GC16
+            fi
+            VP_LASTDRAW=$(vp_now) ;;
+        eips) vp_eips_all ;;
+    esac
+    return 0
+}
+# vp_progress 百分比(-1 = 不知道) 第一行 第二行 [force]：方格变了就画；字变了且离上次画已有 5 秒（VP_MIN）才画
+vp_progress() {
+    pct=${1:--1}; [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+    VP_L1=${2:-}; VP_L2=${3:-}; now=$(vp_now)
+    [ $((now - VP_LASTST)) -ge 1 ] && vp_status "state=$(vp_state "$VP_CUR")" "step=$VP_CUR" "label=$VP_CUR_LABEL" "index=$(vp_idx "$VP_CUR")" \
+        "steps=$(echo $VP_STEPS | tr ' ' ',')" "pct=$pct" "line1=$VP_L1" "line2=$VP_L2"
+    [ -n "$VP_ON" ] || return 0
+    cells=-1; [ "$pct" -ge 0 ] 2>/dev/null && cells=$((pct * VP_N / 100))
+    textdue=; { [ "$VP_L1" != "$VP_DL1" ] || [ "$VP_L2" != "$VP_DL2" ] || [ "$pct" != "$VP_PCT" ]; } && [ $((now - VP_LASTDRAW)) -ge ${VP_MIN:-5} ] && textdue=1
+    [ "${4:-}" = force ] && textdue=1
+    [ "$cells" != "$VP_CELLS" ] || [ -n "$textdue" ] || return 0
+    # 解压 / 安装时（VP_CMIN）：方格也至少隔这么多秒才画，少刷屏、少抢 CPU
+    [ -z "$textdue" ] && [ "${4:-}" != force ] && [ $((now - VP_LASTDRAW)) -lt ${VP_CMIN:-0} ] && return 0
+    case "$VP_MODE" in
+        fb)
+            if [ "$cells" != "$VP_CELLS" ]; then
+                if [ "$VP_CELLS" -lt 0 ] 2>/dev/null || [ "$cells" -lt "$VP_CELLS" ] 2>/dev/null; then vp_bar_all $((cells < 0 ? 0 : cells))
+                else i=$VP_CELLS; while [ $i -lt $cells ]; do vp_cell $i 1; i=$((i + 1)); done; fi
+            fi
+            ptxt=; [ "$pct" -ge 0 ] 2>/dev/null && ptxt="$pct%"
+            vp_t $G_PCTX $G_PCTY $G_PCTW $G_PCTH $(vp_sc 76) "$VP_FEN" BLACK WHITE 1 "$ptxt"
+            vp_t $G_IX $G_I1Y $G_IW $G_I1H $(vp_sc 36) "$VP_FZB" BLACK WHITE 0 "$VP_L1"
+            vp_t $G_IX $G_I2Y $G_IW $G_I2H $(vp_sc 30) "$VP_FZR" BLACK WHITE 0 "$VP_L2"
+            vp_ref $G_M $G_PCTY $((G_BW - G_SH)) $((G_I2Y + G_I2H - G_PCTY)) GL16 ;;
+        eips) vp_eips_all ;;
+    esac
+    VP_CELLS=$cells; VP_PCT=$pct; VP_DL1=$VP_L1; VP_DL2=$VP_L2; VP_LASTDRAW=$now
+    return 0
+}
+vp_elapsed() { vp_mmss $(( $(vp_now) - ${1:-$VP_ST0} )); }
+# vp_watch pid 文件 总字节 第二行 [out]：后台命令跑着时每秒看一次它读到（out = 写到）文件的哪里，换成进度；
+# 读不到位置时只走已用时间。命令结束就返回（返回值由调用方 wait 取）
+vp_watch() {
+    wp=$1; wf=$2; wt=${3:-0}; wl2=${4:-}; wo=${5:-}; rp=; rfd=; tries=0
+    while kill -0 "$wp" 2>/dev/null; do
+        pos=
+        if [ -n "$wo" ]; then pos=$( { wc -c < "$wf"; } 2>/dev/null | tr -d " ")
+        else
+            [ -n "$rp" ] && [ ! -e /proc/$rp/fdinfo/$rfd ] && rp=     # 读文件的进程换了（tar 的 gzip 子进程之类）：重新找
+            if [ -z "$rp" ] && [ $tries -lt 60 ]; then
+                tries=$((tries + 1))
+                for d in /proc/[0-9]*; do
+                    n_=${d#/proc/}; [ "$n_" -ge "$wp" ] 2>/dev/null || continue
+                    for l in $d/fd/*; do [ "$(readlink "$l" 2>/dev/null)" = "$wf" ] && { rp=$n_; rfd=${l##*/}; break 2; }; done
+                done
+            fi
+            [ -n "$rp" ] && pos=$(sed -n 's/^pos:[[:space:]]*//p' /proc/$rp/fdinfo/$rfd 2>/dev/null || true)
+        fi
+        pct=-1; l1="已用 $(vp_elapsed)"
+        if [ -n "$pos" ] && [ "$wt" -gt 0 ] 2>/dev/null; then
+            pct=$((pos / 1024 * 100 / (wt / 1024 + 1))); [ $pct -gt 99 ] && pct=99
+            l1="$(vp_mb "$pos") / $(vp_mb "$wt") MB · 已用 $(vp_elapsed)"
+        fi
+        vp_progress $pct "$l1" "$wl2"
+        sleep 1
+    done
+    return 0
+}
+# 后台“秒表”：一段不知道进度的等待（框架冷启动、首次开机）——每 5 秒刷一次已用时间，方格按预计时间估（最多到 95%）
+# vp_ticker_start 预计秒数 第二行 [超过多少秒后换成的第二行]；vp_ticker_stop
+VP_TICK=
+vp_ticker_start() {
+    vp_ticker_stop
+    ( exp=${1:-60}; [ "$exp" -gt 0 ] 2>/dev/null || exp=60
+      while :; do
+          e=$(( $(vp_now) - VP_ST0 )); p=$((e * 100 / exp)); [ $p -gt 95 ] && p=95
+          l2=$2; [ -n "${3:-}" ] && [ $e -gt $((exp * 2)) ] && l2=$3
+          vp_progress $p "已用 $(vp_mmss $e) · 一般要 $(vp_mmss $exp) 左右" "$l2"
+          sleep 5
+      done ) </dev/null >/dev/null 2>&1 &
+    VP_TICK=$!
+}
+vp_ticker_stop() { [ -n "$VP_TICK" ] && kill "$VP_TICK" 2>/dev/null; VP_TICK=; return 0; }
+# 出错画面：代码 + 谁的问题 + 怎么办
+vp_error() { # code 标题 说明（可多行）
+    VP_CUR_LABEL=$2
+    vp_status "state=error" "step=$VP_CUR" "code=$1" "label=$2" "line2=$3"
+    [ -n "$VP_ON" ] || [ "${VP_ERR_SHOW:-0}" = 1 ] || return 0
+    VP_ON=1
+    case "$VP_MODE" in
+        fb)
+            [ -n "${G_M:-}" ] || vp_geom
+            VP_HEAD="没有完成 · 代码 $1"; c=$VP_CUR; VP_CUR=error
+            vp_stepbox; VP_CUR=$c
+            vp_t $G_IX $((G_SY + $(vp_sc 232))) $G_IW $((G_SHH - $(vp_sc 260))) $(vp_sc 32) "$VP_FZR" BLACK WHITE 0 "$3"
+            vp_ref $G_M $G_SY $G_BW $G_SHH GC16 ;;
+        eips) vp_eips 4 "FAILED, code $1"; vp_eips 5 ""; vp_eips 6 "$(vp_en_err "$1" | cut -c1-46)"; vp_eips 7 "$(vp_en_err "$1" | cut -c47-92)"; vp_eips 8 "$(vp_en_err "$1" | cut -c93-140)" ;;
+    esac
+    return 0
+}
+# ---- 网络检查（安装器下载前、桌面的“网络诊断”）：只连 $1（我们自己的服务器），不找第三方测速站 ----
+# vp_netcheck <服务器根地址>：设 NC_WIFI NC_DNS NC_SRV（ok|fail|skip）、NC_CODE（失败时的代码）、NC_LINES（给人看的几行）
+vp_netcheck() {
+    u=$1; host=${u#*://}; host=${host%%/*}; host=${host%%:*}
+    NC_WIFI=fail; NC_DNS=skip; NC_SRV=fail; NC_CODE=0; NC_LINES=; NC_MSG=; NC_EN=
+    rt=$(awk '$2 == "00000000" && $1 != "lo" {print $1; exit}' /proc/net/route 2>/dev/null)
+    ip_=
+    [ -n "$rt" ] && ip_=$(ip -4 addr show "$rt" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+    cm=$(lipc-get-prop com.lab126.wifid cmState 2>/dev/null || true)
+    if [ -n "$rt" ]; then NC_WIFI=ok; NC_LINES="■ Wi-Fi 已连接（${rt}${ip_:+ $ip_}）"
+    else NC_LINES="□ Wi-Fi 没有连上${cm:+（$cm）}"; NC_CODE=11; NC_MSG="没连 Wi-Fi：请在 Kindle 的设置里连上 Wi-Fi 再试"; NC_EN="No Wi-Fi. Connect Wi-Fi, tap again."; return 1; fi
+    w=$(curl_do -sS -o /dev/null -I --connect-timeout 10 --max-time 20 -w '%{time_namelookup} %{time_connect} %{time_appconnect} %{http_code}' "$u/" 2>/dev/null) && rc=0 || rc=$?
+    set -- $w; hc=${4:-000}
+    tn=$(awk -v t="${1:-0}" 'BEGIN { printf "%.2f", t }'); tc=$(awk -v t="${2:-0}" 'BEGIN { printf "%.2f", t }'); ta=$(awk -v t="${3:-0}" 'BEGIN { printf "%.2f", t }')
+    case "$host" in *[!0-9.]*) dnsok=1 ;; *) dnsok=ip ;; esac
+    if [ "$rc" = 6 ]; then
+        NC_DNS=fail; NC_LINES="$NC_LINES
+□ 域名解析失败：$host"; NC_CODE=12; NC_MSG="Wi-Fi 连上了，但上不了网（域名解析失败）：换个 Wi-Fi，或在 network.conf 里设 VD_DNS / VD_IP"; NC_EN="DNS failed for $host. Try another Wi-Fi."; return 1
+    fi
+    if [ "$dnsok" = ip ]; then NC_DNS=skip; NC_LINES="$NC_LINES
+■ 域名解析：不需要（直接用 IP）"
+    else NC_DNS=ok; NC_LINES="$NC_LINES
+■ 域名解析 $host（${tn} 秒）"; fi
+    if [ "$rc" = 0 ] && [ "$hc" -lt 500 ] 2>/dev/null; then
+        NC_SRV=ok; t_=$ta; [ "$t_" = 0.00 ] && t_=$tc
+        NC_LINES="$NC_LINES
+■ 服务器能连上（${t_} 秒）"; return 0
+    fi
+    NC_SRV=fail; NC_CODE=13
+    # 说清楚卡在哪一步（Scribe 用户只看到“网络不行”）：连接被拒 / 连接超时 / TLS 握手卡住或失败（Kindle 时间不对时证书全部无效）/ 太慢。
+    # NC_OZ = 这台机器该用的离线整包（按内核，和 VeraDroid-Offline.sh 的规则一样），NC_EN = 给 eips 的英文一句
+    case "$(uname -r)" in 3.*|4.1.*) NC_OZ=VeraDroid-Offline-Legacy.zip ;; 4.*) NC_OZ=VeraDroid-Offline-Experimental.zip ;; *) NC_OZ=VeraDroid-Offline.zip ;; esac
+    off="换个网络，或改用离线整包 $NC_OZ（官网下载，电脑拷进 documents）"
+    case "$rc" in
+        28) if [ "$tc" != 0.00 ] && [ "$ta" = 0.00 ] && [ "$dnsok" = 1 ]; then
+                NC_LINES="$NC_LINES
+□ 连上了服务器（${tc} 秒），但安全连接（TLS）握手 20 秒没完成"; NC_MSG="HTTPS 握手卡住（常见于网络干扰 HTTPS）。不是机器的问题：$off"; NC_EN="TLS handshake stalled (HTTPS blocked?). Use $NC_OZ"
+            elif [ "$tc" = 0.00 ]; then
+                NC_LINES="$NC_LINES
+□ 服务器 10 秒连不上（连接超时）"; NC_MSG="连不上 VeraDroid 服务器（连接超时：被拦了或网络太差）。不是机器的问题：$off"; NC_EN="Connect timed out (blocked?). Use $NC_OZ"
+            else
+                NC_LINES="$NC_LINES
+□ 服务器 20 秒没有回应（网络太慢）"; NC_MSG="网络太慢，服务器 20 秒没有回应。不是机器的问题：$off"; NC_EN="Network too slow. Use $NC_OZ"
+            fi ;;
+        7) NC_LINES="$NC_LINES
+□ 连接被拒绝 / 被拦截（curl 7）"; NC_MSG="连不上 VeraDroid 服务器（连接被拒绝或被拦截）。不是机器的问题：$off"; NC_EN="Connection refused/blocked. Use $NC_OZ" ;;
+        35|51|53|54|58|59|60|64|66|77|80|83|90|91)
+            yr=$(date +%Y 2>/dev/null)
+            if [ "${yr:-2026}" -lt 2025 ] 2>/dev/null; then
+                NC_LINES="$NC_LINES
+□ 安全连接（TLS）失败：Kindle 的时间不对（$(date '+%Y-%m-%d')）"; NC_MSG="Kindle 的日期时间不对，HTTPS 证书全部校验失败：在 Kindle 设置里改对日期时间，再点一次"; NC_EN="Kindle clock wrong ($(date +%F)): fix date/time"
+            else
+                NC_LINES="$NC_LINES
+□ 安全连接（TLS）失败（curl $rc）"; NC_MSG="HTTPS 连接失败（网络在拦截或篡改 HTTPS）。不是机器的问题：$off"; NC_EN="TLS/HTTPS failed (curl $rc). Use $NC_OZ"
+            fi ;;
+        0) NC_LINES="$NC_LINES
+□ 服务器在维护（HTTP $hc）"; NC_MSG="VeraDroid 服务器暂时不可用（HTTP $hc）：过一会儿再试，或改用离线整包 $NC_OZ"; NC_EN="Server unavailable (HTTP $hc). Retry later" ;;
+        *) NC_LINES="$NC_LINES
+□ 连不上服务器（curl $rc）"; NC_MSG="连不上 VeraDroid 服务器（可能被墙或服务器维护）。不是机器的问题：$off"; NC_EN="Cannot reach server (curl $rc). Use $NC_OZ" ;;
+    esac
+    return 1
+}
+# 桌面“网络诊断”（宿主命令 netdiag，结果写 $X/ctl/netdiag.status）：和安装器同样的三项检查，再用真实的安装包测几秒下载速度
+# （只连我们自己的服务器，不找第三方测速站）。在子 shell 里跑：会读 network.conf（代理 / DNS / IP）。
+vp_netdiag() { # 输出文件 [服务器根地址]
+    nf=$1; nb=${2:-https://veradroid.wenjin.jp}
+    VD=${VD:-/mnt/base-us/veradroid}
+    [ -f "$VD/network.conf" ] && . "$VD/network.conf"
+    CURL_OPTS=
+    [ -n "${VD_PROXY:-}" ] && CURL_OPTS="$CURL_OPTS -x $VD_PROXY"
+    [ -n "${VD_IP:-}" ] && CURL_OPTS="$CURL_OPTS --resolve veradroid.wenjin.jp:443:$VD_IP --resolve veradroid.wenjin.jp:80:$VD_IP"
+    [ -n "${VD_DNS:-}" ] && CURL_OPTS="$CURL_OPTS --dns-servers $VD_DNS"
+    type curl_do >/dev/null 2>&1 || curl_do() { curl $CURL_OPTS "$@"; }
+    t0=$(date +%s)
+    vp_kvw "$nf" state=running step=check "line1=正在检查 Wi-Fi、域名解析、服务器…" "start=$t0"
+    if ! vp_netcheck "$nb"; then
+        case "$NC_CODE" in 11) v=offline; c="没连 Wi-Fi" ;; 12) v=nodns; c="上不了网（域名解析失败）" ;; *) v=noserver; c="服务器连不上" ;; esac
+        vp_kvw "$nf" state=done "verdict=$v" "code=$NC_CODE" "conclusion=$c" "lines=$NC_LINES" "line2=$NC_MSG" "start=$t0"
+        return 0
+    fi
+    vp_kvw "$nf" state=running step=speed "line1=正在测下载速度（用真实的安装包下 6 秒）…" "lines=$NC_LINES" "start=$t0"
+    case "$(uname -r)" in 3.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/api/bootstrap" ;; esac
+    u=$(curl_do -fsSL --max-time 15 "$m" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    sp=0
+    [ -n "$u" ] && sp=$(curl_do -s -o /dev/null --connect-timeout 10 --max-time 6 -w '%{speed_download}' "$u" 2>/dev/null | cut -d. -f1)
+    case "$sp" in ''|*[!0-9]*) sp=0 ;; esac
+    min=$(( 141557760 / (sp + 1) / 60 ))
+    if [ -z "$u" ]; then v=noserver; c="服务器连得上，但查不到安装包"; l="□ 查不到安装包信息"
+    elif [ "$sp" -ge 204800 ]; then v=ok; c="网络正常"; l="■ 速度 $(vp_rate $sp)（整包约 $((min + 1)) 分钟）"
+    elif [ "$sp" -ge 51200 ]; then v=slow; c="网络慢"; l="□ 速度 $(vp_rate $sp)（整包约 $((min + 1)) 分钟）"
+    else v=slow; c="网络很慢"; l="□ 速度 $(vp_rate $sp)（太慢：建议换网络或用离线整包）"; fi
+    w=""; [ "$v" = slow ] && w="不是机器的问题：可以换个网络，或改用离线整包（官网下载，电脑拷进 Kindle）"
+    vp_kvw "$nf" state=done "verdict=$v" "conclusion=$c" "speed=$sp" "lines=$NC_LINES
+$l" "line2=$w" "start=$t0"
+    return 0
+}
+# END vd_progress
 NET_SUM=; UNPACK_PRI=
-vp_step() { show "$2"; }
-vp_upgrade() { :; }
+# ---- 在 Android 里点的更新：进度、结果（2026-11-20）----
+case "$0" in */vd-fullupdate-bootstrap.sh) VD_FROM_HOME=1 ;; esac      # 0.8.13 及以前的宿主不设 VD_FROM_HOME，看脚本名
+UPD_MODE=manual; [ "${VD_AUTOUPDATE:-0}" = 1 ] && UPD_MODE=auto; [ -n "${VD_BUNDLE:-}" ] && UPD_MODE=offline
+UPD_RESULT=/mnt/base-us/veradroid/state/update.result
+# vd_result 状态 代码 标题 说明：这次安装 / 更新的结果（state/update.result，KEY=value）。vd_guard 在 Android 重新起来后转写给 VeraHome
+vd_result() {
+    mkdir -p "${UPD_RESULT%/*}" 2>/dev/null || true
+    { echo "state=$1"; echo "code=$2"; echo "label=$3"; printf 'line2=%s\n' "$4" | head -1; echo "mode=$UPD_MODE"
+      echo "from=${cur_ver:-}"; echo "to=${LATEST_VER:-${ver:-}}"; echo "time=$(date +%s)"; echo "pid=$$"; } > "$UPD_RESULT.tmp" 2>/dev/null \
+        && mv -f "$UPD_RESULT.tmp" "$UPD_RESULT" 2>/dev/null || true
+    return 0
+}
+# 整屏进度画面：只在 Android 里点的更新、Android 已经停掉之后画（后台自动更新时用户在读书，不盖他的屏幕）
+vd_vp_show() {
+    [ "${VD_FROM_HOME:-0}" = 1 ] && [ "$UPD_MODE" = manual ] || return 0
+    [ -n "${VP_ON:-}" ] || [ "${VP_MODE:-none}" = none ] && return 0
+    android_up && return 0
+    sleep 2      # 刚停掉的显示桥可能还在刷最后一帧
+    vp_show
+    # 刷新偶尔被拒（PW4 模拟器：刚停掉 Android 时一次整屏刷新失败，画面退回成几行 eips 英文）：等一下再试一次整屏画面
+    if [ "$VP_MODE" = eips ] && [ -n "$VP_FB" ] && [ "${VP_FORCE_EIPS:-0}" != 1 ]; then sleep 3; VP_MODE=fb; vp_screen; fi
+    vp_progress "${VP_PCT:--1}" "${VP_L1:-}" "${VP_L2:-}" force
+}
+# vd_guard：安装器结束（成功 / die / 被杀）后的收尾，在后台等本进程退出：
+#  1. Kindle 界面没放出来（KEPT_UI）又没有 Android 在跑：等 90 秒（安装器 / 宿主的包装会启动），还没有就启动 Android，起不来就 stop.sh 放出 Kindle 界面；
+#  2. 把 state/update.result 写成 VeraHome 的 ctl/update.status（stop.sh 删掉了 $W/kfb，要等 Android 起来，最多 15 分钟）。
+VD_GUARD=
+vd_guard() {
+    [ -z "$VD_GUARD" ] || return 0
+    VD_GUARD=1; me=$$; kept=${KEPT_UI:-}; t0=$(date +%s)
+    ( set +eu; trap '' HUP INT TERM
+      while kill -0 $me 2>/dev/null; do sleep 2; done
+      vg_up() { P=$(cat $W/pid 2>/dev/null); [ -n "$P" ] && kill -0 "$P" 2>/dev/null; }
+      [ -s "$UPD_RESULT" ] && [ "$(sed -n 's/^pid=//p' "$UPD_RESULT")" = "$me" ] || vd_result error 15 "更新没有装上" "安装器意外退出（被结束或出错），旧版本没有改动；日志在 veradroid/logs/install-detail.log"
+      if [ -n "$kept" ]; then
+          i=0; while [ $i -lt 45 ] && ! vg_up; do sleep 2; i=$((i + 1)); done
+          if ! vg_up; then
+              vlog "guard: android not running after the installer ended: starting it"
+              setsid sh "$VD/boot/veradroid.sh" home </dev/null >/dev/null 2>&1
+              i=0; while [ $i -lt 90 ] && ! vg_up; do sleep 2; i=$((i + 1)); done
+              vg_up || { vlog "guard: android did not start: back to the kindle ui"; rm -f $W/restarting; sh "$VD/boot/stop.sh" >/dev/null 2>&1; }
+          fi
+      fi
+      i=0; while [ $i -lt 450 ]; do [ -p $W/kfb/ctl/cmd ] && break; sleep 2; i=$((i + 1)); done
+      [ -p $W/kfb/ctl/cmd ] || exit 0
+      sleep 5
+      U=$W/kfb/ctl/update.status
+      # 宿主（cmd.sh）自己已经写了更新的结果就不覆盖
+      [ -f $U ] && [ "$(sed -n 's/^time=//p' $U)" -ge "$t0" ] 2>/dev/null && grep -q '^state=\(error\|done\)' $U && exit 0
+      { sed -n -e '/^\(state\|code\|label\|line2\|mode\)=/p' "$UPD_RESULT"
+        [ "$(sed -n 's/^state=//p' "$UPD_RESULT")" = done ] && echo "result=ok"
+        echo "step=install"; echo "time=$(date +%s)"; } > $U.tmp 2>/dev/null && chmod 644 $U.tmp && mv -f $U.tmp $U
+      vlog "guard: result written for VeraHome: $(tr '\n' ' ' < $U | cut -c1-200)"
+    ) </dev/null >/dev/null 2>&1 &
+    return 0
+}
 dl_code() { echo 14; }
 ui_run() { shift 4; "$@"; }   # ui_run in <文件> <字节> <说明> 命令…：只跑命令
 # BEGIN vd_dl
@@ -861,6 +1384,7 @@ vd_parts_keep_pristine() {
     for f in "$SYS"/rootfs/system/priv-app/VeraHome/VeraHome.apk "$SYS"/rootfs/system/priv-app/VeraHome/oat/*/* \
              "$SYS"/rootfs/system/app/VeraIME/VeraIME.apk "$SYS"/rootfs/system/app/VeraIME/oat/*/* \
              "$SYS/rootfs/system/lib/libandroid_runtime.so" "$SYS/rootfs/system/bin/netd" "$SYS/rootfs/system/lib/hw/hwcomposer.kindle.so" \
+             "$SYS/rootfs/system/lib/libvdshim.so" \
              "$SYS/rootfs/system/build.prop" "$SYS/rootfs/init.kindle.rc"; do
         [ -f "$f" ] || continue
         s=$(sha256sum "$f" 2>/dev/null | cut -c1-64); [ -n "$s" ] || continue
@@ -901,9 +1425,19 @@ install_wait_idle() {
     vd_phase replace
 }
 # 安装器停 Android：stop.sh 把原因写进 veradroid.log（以前只记一个已经退出的父进程，看不出是谁停的）
+# 在 Android 里点“更新”（宿主 cmd.sh 的 fullupdate 下载本脚本到 /tmp/vd-fullupdate-bootstrap.sh 再跑；新宿主另设 VD_FROM_HOME=1）：
+# Android 在前台时停它不把 Kindle 界面放出来（$W/restarting，同 resize.sh）——屏幕留给整屏进度画面；Kindle 框架在备份的几分钟里
+# 冷启动、重建书库索引、改阅读记录，是备份清单里的文件中途消失（busybox tar 报错，老机型安装因此整个停下）的主要来源，也拖慢备份。
+# 装完安装器自己启动 Android；安装器无论怎么结束，vd_guard 都会确保 Android 或 Kindle 界面有一个起来。
 install_stop_android() {
     show "先退出正在运行的 VeraDroid（正在安装更新）…"
+    if [ "${VD_FROM_HOME:-0}" = 1 ] && [ "${VD_AUTOUPDATE:-0}" != 1 ] && android_up && [ ! -f "$W/frozen" ]; then
+        : > "$W/restarting" 2>/dev/null && KEPT_UI=1 && vlog "manual update from Android: the Kindle UI stays stopped during the install (progress screen); android starts again at the end"
+    fi
+    vd_guard
     VD_STOP_REASON="installer pid $$ (${VD_AUTOUPDATE:+auto }update ${cur_ver:-?} -> ${LATEST_VER:-${ver:-?}})" sh "$VD/boot/stop.sh" ${1:-} || true
+    rm -f "$W/restarting" 2>/dev/null || true
+    vd_vp_show
 }
 # rm -rf 之前：$1 下面（self=1 包括 $1 本身）有挂载就返回 0（绝不能穿过 bind 挂载删到 Kindle 的书）
 # 2026-11-13：容器自己的挂载命名空间里的挂载（Kindle 的 documents 绑在那里）宿主 /proc/mounts 看不到，也要查（同 boot/lib/common.sh）
@@ -1209,6 +1743,19 @@ bk_select() {
     rm -f $BKL.all
     vlog "backup selection: $(wc -l < $BKL | tr -d ' ') files ${BK_NEEDK}K (budget ${BK_BUDGETK}K for books); not backed up: $BK_SKIPN files ${BK_SKIPK}K (books over the budget / files >= 20 MB; listed in the documents manifest)"
 }
+# bk_prune：真正备份前把清单（$BKL）里已经不在的文件去掉，累计大小（$BKC，bk_progress 按行对应）一起重算
+bk_prune() {
+    [ -s $BKL ] || return 0
+    : > $BKL.live; : > $BKC.live; bp_n=0; bp_t=0; bp_p=0
+    while IFS= read -r bp_f && IFS= read -r bp_c <&4; do
+        bp_k=$((bp_c - bp_p)); bp_p=$bp_c
+        if [ -f "/mnt/us/$bp_f" ]; then bp_t=$((bp_t + bp_k)); printf '%s\n' "$bp_f" >> $BKL.live; echo $bp_t >> $BKC.live
+        else bp_n=$((bp_n + 1)); [ $bp_n -le 3 ] && vlog "user backup: gone since the selection, left out: $bp_f"; fi
+    done < $BKL 4< $BKC
+    mv -f $BKL.live $BKL; mv -f $BKC.live $BKC
+    [ $bp_n -gt 0 ] && { vlog "user backup: $bp_n listed files no longer exist (removed / renamed after the selection), left out"; BK_NEEDK=$bp_t; need=$bp_t; }
+    return 0
+}
 USER_SAFE=; BK_RESULT=empty; BK_FELL=
 BK_MODE=$(vd_backup_mode)
 # emulator-only 机型（没在真机上验证过）：安装前一定要有一份备份，“不备份”在这里按“只备份设置和阅读进度”做
@@ -1231,6 +1778,8 @@ EMU_BAKK=0
 KEEPAWAKE=
 if [ "$TESTED" = emulator-only ]; then
     KEEPAWAKE=$(lipc-get-prop com.lab126.powerd preventScreenSaver 2>/dev/null || true); case "$KEEPAWAKE" in 1) ;; *) KEEPAWAKE=0 ;; esac
+    # 被硬杀（SIGKILL）时上面的 EXIT 陷阱不跑，1 会一直留着、电源键进不了屏保：原值同时记在 state/keepawake.orig，下次启动时 veradroid.sh 放回
+    [ "$KEEPAWAKE" = 0 ] && { echo 0 > /mnt/base-us/veradroid/state/keepawake.orig; } 2>/dev/null || true
     lipc-set-prop com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1 || true
 fi
 FS=$(stat -f -c %T /mnt/base-us 2>/dev/null || true)
@@ -1481,6 +2030,11 @@ if [ "${VD_FACTORY:-0}" != "1" ]; then
             if [ "$c" = "0" ]; then
                 show "已安装 VeraDroid $cur_ver，完整性检查通过，无需重装"
                 show "直接启动…"
+                # VeraHome 的进度卡片：宿主的包装先写了“正在连接更新服务器”，不改它就一直挂在那里（直到一小时后才不显示）
+                vp_kvw "$W/kfb/ctl/update.status" state=done result=latest step=net "label=已是最新版本 $cur_ver" "mode=$UPD_MODE"
+                # 离线包和已装的是同一版：留在 documents 里没用（约 140 MB），和装完一样清掉。只在离线安装时（VD_OFFLINE_BUNDLE），
+                # 只删我们的固定文件名；联网安装和自动更新时 remove_offline_package 什么都不做（同 bootstrap.sh，c539dbe）
+                remove_offline_package
                 remove_installer_later
                 [ "${VD_NO_START:-0}" = 1 ] || setsid sh "$VD/boot/veradroid.sh" home </dev/null >/dev/null 2>&1 || true
                 exit 0
@@ -1493,6 +2047,7 @@ if [ "${VD_FACTORY:-0}" != "1" ]; then
                 else
                     show "本机 $cur_ver 不低于服务器 $latest_ver，跳过重装"
                 fi
+                vp_kvw "$W/kfb/ctl/update.status" state=done result=latest step=net "label=已是最新版本 $cur_ver" "mode=$UPD_MODE"
                 remove_installer_later
                 [ "${VD_NO_START:-0}" = 1 ] || setsid sh "$VD/boot/veradroid.sh" home </dev/null >/dev/null 2>&1 || true
                 exit 0
@@ -1528,6 +2083,10 @@ for d in /mnt/base-us/veradroid.bak.*; do   # root-legacy
 done
 offline=0
 vd_phase download
+# 进度：步骤表 + 状态文件（VeraHome 的进度卡片：Android 还在跑的下载阶段就看得到）。整屏画面等停掉 Android 以后才画（vd_vp_show）
+VP_STATUS=$W/kfb/ctl/update.status; VP_KV="mode=$UPD_MODE"
+vp_begin "VeraDroid 更新" "VERADROID UPDATE" "Kindle ${MODEL:-} · 更新期间别关机、别拔电" "装完会自动回到 Android；书、应用和账号都保留" "dl verify unpack backup install boot"
+vp_step dl "正在连接更新服务器…"
 if [ -n "${VD_BUNDLE:-}" ] && [ -f "$VD_BUNDLE" ]; then
     offline=1
     ver=${VD_VERSION:-0.21}
@@ -1636,6 +2195,9 @@ if android_up; then
         grep -q " $SYS " /proc/mounts || loop_mount "$SYSTEM_IMG" "$SYS" || die "无法重新挂载 ext4 系统盘"
     fi
 fi
+# 手动更新：用户可能已经回到 Kindle（Android 冻结或退出，上面没有调 install_stop_android）——收尾和整屏进度照样要
+[ "$UPD_MODE" = auto ] || vd_guard
+vd_vp_show
 # 增量更新：Android 停了，在动任何东西之前组装新系统镜像（硬链接旧镜像，只多占变了的文件；不行就下整个镜像）
 if [ -n "$PARTS" ]; then vd_parts_rootfs; fi
 
@@ -1687,12 +2249,35 @@ if [ -s $BKL ]; then
         elif [ "$BK_BUDGETK" = 0 ]; then show "Backing up settings and reading progress ($((need / 1024)) MB), do NOT restart / 正在备份设置和阅读进度（约 $((need / 1024)) MB，书不备份），请勿重启 Kindle"
         else show "Backing up settings and books ($((need / 1024)) MB), do NOT restart / 正在备份设置和书（约 $((need / 1024)) MB），请勿重启 Kindle"; fi
         [ "$BK_SKIPN" -gt 0 ] && vlog "user backup: $BK_SKIPN files (${BK_SKIPK}K) not in the backup, they stay where they are"
+        vp_step backup "书和设置打一个备份包（约 $((need / 1024)) MB）" "只在本机；装完核对书库；请勿重启 Kindle"
         t0=$(date +%s)
-        bk_progress $bv "$need" "$t0" </dev/null &
-        BKW=$!
         vlog "user backup: ${need}K to back up ($(wc -l < $BKL | tr -d ' ') files)"
-        # 管道的退出码只看 gzip：tar 的失败另外记下来
-        if { tar -cvf - -C /mnt/us -T $BKL 2>$bv || echo fail > $bv.rc; } | gzip -1 > "$part" && [ ! -f $bv.rc ] && gzip -t "$part" 2>/dev/null; then
+        # 2026-11-20 老机型“点了更新装不上”（PW4 现场日志：user backup FAILED … tar: error exit delayed from previous errors，
+        # 随后报“空间不够做书库备份”退出，其实空间够）：清单是安装一开始挑的，到真正备份已过了几分钟（下载、停 Android，
+        # Kindle 界面冷启动改写阅读记录 / 缩略图 / KOReader 缓存）。busybox tar 遇到清单里已经不在的文件（No such file）
+        # 或读到一半变短的文件（short read）就整个失败（PW4 模拟器实测 rc=1，同一句报错）；emulator-only 机型没有备份不装。
+        # 现在：备份前把已经不在的文件从清单里去掉（bk_prune）；还是因为文件在变而失败就重新挑一次再备一次；仍失败才停，并说真实原因。
+        bk_try=1; BK_WHY=
+        while :; do
+            bk_prune
+            rm -f "$part" $bv.rc; : > $bv
+            bk_progress $bv "$need" "$t0" </dev/null &
+            BKW=$!
+            # 管道的退出码只看 gzip：tar 的失败另外记下来
+            if { tar -cvf - -C /mnt/us -T $BKL 2>$bv || echo fail > $bv.rc; } | gzip -1 > "$part" && [ ! -f $bv.rc ] && gzip -t "$part" 2>/dev/null; then
+                break
+            fi
+            kill "$BKW" 2>/dev/null || true
+            BK_WHY=$(grep -a '^tar: ' $bv 2>/dev/null | grep -av 'error exit delayed' | head -2 | cut -c1-160 | tr '\n' ' ')
+            [ -n "$BK_WHY" ] || BK_WHY=$(grep -a -i -e 'error' -e 'short' -e 'space' $bv 2>/dev/null | head -2 | cut -c1-160 | tr '\n' ' ')
+            vlog "user backup attempt $bk_try failed: ${BK_WHY:-?} (rc file: $(cat $bv.rc 2>/dev/null))"
+            [ $bk_try -lt 2 ] || break
+            case "$BK_WHY" in *"No space"*|*"o space left"*) break ;; esac
+            bk_try=$((bk_try + 1))
+            show "Some files changed during the backup, backing up again / 备份时有文件正被 Kindle 改动，重新挑选文件再备份一次…"
+            bk_select || true; need=$BK_NEEDK; t0=$(date +%s); sleep 3
+        done
+        if [ -f "$part" ] && [ ! -f $bv.rc ] && gzip -t "$part" 2>/dev/null; then
             kill "$BKW" 2>/dev/null || true
             USER_SAFE=/mnt/base-us/veradroid/backup/user-backup-$stamp.tgz
             mv "$part" "$USER_SAFE"; BK_RESULT=ok
@@ -1718,15 +2303,17 @@ if [ -s $BKL ]; then
             kill "$BKW" 2>/dev/null || true
             rm -f "$part"
             BK_RESULT=failed
-            show "Pre-install backup failed, installing anyway / 安装前备份失败（见 veradroid/logs/install-detail.log），继续安装；安装不会删除任何书或设置"
-            vlog "user backup FAILED ($(tail -c 300 $bv 2>/dev/null | tr '\n' ' '))"
+            [ "$TESTED" = emulator-only ] || show "Pre-install backup failed, installing anyway / 安装前备份失败（见 veradroid/logs/install-detail.log），继续安装；安装不会删除任何书或设置"
+            vlog "user backup FAILED (${BK_WHY:-?}; $(tail -c 300 $bv 2>/dev/null | tr '\n' ' '))"
         fi
         rm -f $bv $bv.rc $bv.old
     fi
 fi
 # emulator-only 机型：安装前一定要有一份备份（上面那份就是：书以外的文件 + 预算内的书），做不了就什么都不改、停止安装
 if [ "$TESTED" = emulator-only ] && [ -z "$USER_SAFE" ] && [ -s $BKL ]; then
-    die "空间不够做书库备份（需要约 $(( BK_NEEDK / 1024 + 100 )) MB）。什么都没有改动；请先把一些书拷到电脑上再装"
+    # 以前不管为什么没备份成都说“空间不够”（用户空间明明够，只能一遍遍重点更新）
+    if [ "$BK_RESULT" = nospace ]; then DIE_CODE=21 die "空间不够做书库备份（需要约 $(( BK_NEEDK / 1024 + 100 )) MB）。什么都没有改动；请先把一些书拷到电脑上再装"
+    else DIE_CODE=22 die "安装前的书库备份没做成（${BK_WHY:-原因见 veradroid/logs/install-detail.log}），为了安全没有继续。什么都没有改动，旧版本照常用；可以过一会儿再点一次更新，或用离线包安装"; fi
 fi
 rm -f $BKL $BKC
 # 这次的备份结果（veradroid/state/backup.last；设置里“已备份的数据”看它：核对书库之前这次的备份不能删）和每份备份是哪种（backup-kinds）
@@ -1858,6 +2445,7 @@ if [ -s "$STABLE" ]; then
     cp "$STABLE" "$SYS/data/media/0/.veradroid/device-id" 2>/dev/null || true
     chmod 644 "$STABLE" "$VD/device-id" "$SYS/data/media/0/.veradroid/device-id" 2>/dev/null || true
 fi
+vp_step install "Android 系统（约 1–5 分钟）" "书、应用和账号都保留；请勿重启 Kindle"
 show "Installing Android, do NOT restart the Kindle (1-5 min) / 正在安装 Android 系统，请勿重启 Kindle（约 1–5 分钟）"
 progress_line 0 "Android system / 安装系统"
 syncer_on
@@ -2114,10 +2702,12 @@ if [ -d "$TMP/veradroid-pw6/kual" ]; then
     cp -a "$TMP/veradroid-pw6/kual/." /mnt/us/extensions/VeraDroid/ 2>/dev/null || true
     chmod 755 /mnt/us/extensions/VeraDroid/start.sh /mnt/us/extensions/VeraDroid/install.sh 2>/dev/null || true
 fi
+if [ -n "${cur_ver:-}" ]; then vd_result done 0 "已更新到 ${ver:-}" "数据、书架、绑定账号都保留"; else vd_result done 0 "已安装 VeraDroid ${ver:-}" "书和 Kindle 的设置都没有动"; fi
 # BH081-1：自动更新（VD_NO_START=1）时用户正在用 Kindle（Android 冻结或没开）：装完不要把 Android 弹到前台。
 if [ "${VD_NO_START:-0}" = 1 ]; then
     show "更新完成：下次点“VeraDroid 启动”时生效"
 else
+    vp_step boot "VeraDroid ${ver:-}" "正在启动新版本，第一次开机要优化应用，可能要几分钟"
     show "正在启动 VeraDroid…"
     progress_line 100 "启动"
     setsid sh "$VD/boot/veradroid.sh" home </dev/null >/dev/null 2>&1

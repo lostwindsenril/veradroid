@@ -432,6 +432,7 @@ cmd_listen() {
             type vp_netdiag >/dev/null 2>&1 && ( vp_netdiag $X/ctl/netdiag.status ) </dev/null >/dev/null 2>&1 & ;;
         saver)   type saver_cmd >/dev/null 2>&1 && saver_cmd "$a" ;;   # saver list | done（saver.sh）：屏保挑选页要看 veradroid/screensaver 里的图
         compile) type compile_cmd >/dev/null 2>&1 && compile_cmd "$a" ;;   # compile all | compile <包>（compile.sh）；进度 ctl/compile.status
+        webview) case "$a" in get|cancel) type webview_cmd >/dev/null 2>&1 && webview_cmd "$a" ;; esac ;;   # 新网页内核下载 / 取消（container.sh webview_dl，进度 ctl/webview.status）
         localupdate) # 离线更新文件夹（localupdate.sh）：check = 只看文件名，结果写 ctl/update.local；install = 校验并安装
             case "$a" in
                 check) ( VD=$VD sh $VD/boot/lib/localupdate.sh check > $X/ctl/update.local.tmp 2>/dev/null; mv -f $X/ctl/update.local.tmp $X/ctl/update.local ) & ;;

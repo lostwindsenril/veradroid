@@ -102,6 +102,17 @@ if [ -z "$VD_INSTWAITED" ] && installer_busy; then
     cd /
     VD_INSTWAITED=1 exec sh /mnt/base-us/veradroid/boot/veradroid.sh "$@"   # 装好的（或安装器回退后的）那一版
 fi
+# 安装器被硬杀（SIGKILL）时它恢复防休眠的 EXIT 陷阱没跑：preventScreenSaver 一直是 1，电源键再也进不了屏保（社区报告，模拟器复现）。
+# 安装器动它之前把原值记在 state/keepawake.orig、正常结束时删掉。这里还看到它、又没有活着的安装器，就放回原值。
+keepawake_heal() {
+    kh_f=/mnt/base-us/veradroid/state/keepawake.orig
+    [ -f $kh_f ] || return 0
+    kh_p=$(cat /mnt/base-us/veradroid/state/install.lock/pid 2>/dev/null)
+    [ -n "$kh_p" ] && kill -0 "$kh_p" 2>/dev/null && [ "$(cat /mnt/base-us/veradroid/state/install.lock/boot 2>/dev/null)" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] && return 0
+    kh_v=$(cat $kh_f 2>/dev/null); case "$kh_v" in 0|1) ;; *) kh_v=0 ;; esac
+    lipc-set-prop -i com.lab126.powerd preventScreenSaver "$kh_v" >/dev/null 2>&1 && rm -f $kh_f && t "restored preventScreenSaver=$kh_v left by an installer that was killed"
+}
+keepawake_heal 2>/dev/null
 
 # 把输出接回系统盘上的日志（之前为了让 stop.sh 能卸载系统盘挪到了 /tmp）。系统盘没挂上时不接：exec 重定向失败会让整个脚本退出，
 # 也不要在镜像下面的裸目录里建一个日志文件。
@@ -112,6 +123,10 @@ start_helpers() {
     kill $(cat $W/cmd.pid 2>/dev/null) 2>/dev/null   # 上次留下的命令监听（冻结期间还活着）
     watchdog &
     echo $! > $W/watchdog.pid
+    # 解冻：上一轮的看守（冻结后它自己会退）。它退了以后 pid 号可能已经给了别的进程：只结束命令行还是 veradroid.sh 的
+    gp=$(cat $W/guard.pid 2>/dev/null); [ -n "$gp" ] && grep -q "boot/veradroid.sh" /proc/$gp/cmdline 2>/dev/null && kill "$gp" 2>/dev/null
+    wd_guard &                                         # 看门狗的看守（watchdog.sh）
+    echo $! > $W/guard.pid
     sleep_watch &
     echo $! > $W/sleep.pid
     type usb_watch_start >/dev/null 2>&1 && usb_watch_start   # 插 USB 线时问要不要切到 USB 传输（usb.sh）
@@ -251,6 +266,7 @@ hostns && echo "androidboot.hardware=kindle androidboot.zygote=zygote32 androidb
 tz_prepare
 zram_on
 slim_apply
+su_hide
 props_apply
 readahead_on
 loopdio_on

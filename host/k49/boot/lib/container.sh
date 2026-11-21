@@ -308,7 +308,206 @@ alarmfix_mount() {     # 容器里（run_in_ns），/dev 的 tmpfs 建好之后�
     echo "veradroid: AlarmManager fix not mounted" >&2
     return 0
 }
+# 待机耗电（fix/standby-drain，2026-11-20 PW6 用户“关 Wi-Fi/蓝牙停在微信读书，夜里 10 小时掉 30 %”）：Android 的 healthd 把电池 uevent
+# 的 netlink 和周期 timerfd（CLOCK_BOOTTIME_ALARM）用 EPOLLWAKEUP 挂在 epoll 上。Android 冻结（屏保、返回 Kindle）后下一条
+# 电池 uevent / 定时器到期就把内核唤醒源（[timerfd] / NETLINK / eventpoll）激活，只有 healthd 下一次 epoll_wait 才放开，
+# 冻着就一直挂着：powerd 每次进休眠都在 1 ms 内被打回（"System out of suspend"、"Repeated_unknown_wakeup"），整夜不休眠
+# （用户诊断：uptime 和墙上时间一样走，电流 41-56 mA）。测试机实测冻结 1 秒后 [timerfd] 唤醒源就一直 active 到解冻。
+# 修法：bin/vdnocap（tools/vdnocap）绑到 /sbin/healthd 上，去掉 CAP_BLOCK_SUSPEND / CAP_WAKE_ALARM 再 exec 原来的 healthd
+# （原文件绑到 /dev/vdlib/healthd.real）：内核对没有 CAP_BLOCK_SUSPEND 的进程悄悄去掉 EPOLLWAKEUP，ALARM 定时器建不起来，
+# healthd 只靠 uevent 更新电量。不能对整个容器去掉：zygote 给 system_server capset CAP_BLOCK_SUSPEND，失败就中止。
+# 休眠归 Kindle 的 powerd（同 alarmfix）。NOCAP_FIX=0 关掉；文件不全就什么都不做（照旧启动）。
+nocap_mount() {        # 容器里（run_in_ns），/dev 的 tmpfs 建好之后、换根之前
+    [ "${NOCAP_FIX:-1}" = 0 ] && return 0
+    [ -f $VD/bin/vdnocap ] && [ -f $R/sbin/healthd ] && [ ! -L $R/sbin/healthd ] || return 0
+    mkdir -p $R/dev/vdlib && cp $VD/bin/vdnocap $R/dev/vdlib/vdnocap && chmod 755 $R/dev/vdlib/vdnocap &&
+        : > $R/dev/vdlib/healthd.real && mount --bind $R/sbin/healthd $R/dev/vdlib/healthd.real || {
+        umount $R/dev/vdlib/healthd.real 2>/dev/null; rm -f $R/dev/vdlib/vdnocap $R/dev/vdlib/healthd.real; return 0; }
+    # 先确认包装能跑起来（静态 ARM 程序；跑不起来时 healthd 是 critical 服务，起不来 init 会重启容器）
+    if $R/dev/vdlib/vdnocap /bin/sh -c 'exit 0' 2>/dev/null; then
+        mount --bind $R/dev/vdlib/vdnocap $R/sbin/healthd && return 0
+    fi
+    umount $R/dev/vdlib/healthd.real 2>/dev/null; rm -f $R/dev/vdlib/vdnocap $R/dev/vdlib/healthd.real
+    echo "veradroid: healthd capability wrapper not mounted" >&2
+    return 0
+}
+# 可选的新网页内核（WEBVIEW=alt，docs/webview-alt.md）：Chromium 119.0.6045.194 WebView，包名 com.embrith.webview
+# （社区用户 momo 从 Chromium 源码编的，去掉了 Google Play 服务客户端库，minSdk 24，armeabi-v7a，贡献者自己的签名）。
+# 不进镜像、不进安装包：用户在“显示与刷新”里打开时才下载（webview_dl，约 45 MB，sha256 钉死在下面），解到 $VD/webview-alt：
+#   app/webview.apk（原样）、overlay/webview-alt-overlay.apk（android/webview-alt/overlay：framework-res 的资源覆盖，
+#   config_webview_packages 只列 com.embrith.webview 并钉死它的证书）。
+# 开机时（webview_mount）把一个新的 /system/vendor 绑进去：原来的 vendor/lib 照旧，加 app/webview-alt（PackageManager 把
+# /vendor/app 当系统应用目录扫描）和 overlay/（zygote 开机时对 /vendor/overlay 跑 idmap --scan，framework 资源换成覆盖里的）。
+# 镜像不改；自带的 com.android.webview 不动，换回去只要不绑。512 MB 机型（lowmem_ram）一律用自带的 52。
+# 两个内核各用各的网页数据（每个应用自己的 app_webview：Cookie、localStorage、IndexedDB——数据在用网页的应用里，
+# 不在内核的包里，所以换了包名也要分开）：换内核时把当前那份改名成 app_webview.vd-<内核> 收起来，换回去时原样放回。
+# 不把 52 的数据复制给 119：模拟器实测 119 不迁移 52 的 Cookie 库和 SQLite 的 localStorage，反过来 52 读不了 119 的数据。
+# 所以第一次换到 119 时应用里的网页要重新登录，换回 52 时原来的登录还在。用户把开关关掉（WEBVIEW=stock）后的下一次开机：
+# 换回 52，再把下载的包和 119 的网页数据（app_webview.vd-alt）都删掉（webview_purge）。
+WEBVIEW_ALT_VER=119.0.6045.194
+WEBVIEW_ALT_PKG=com.embrith.webview
+WEBVIEW_ALT_FILE=webview-alt-119.0.6045.194.tar.gz       # 服务器上 bundles/<文件>（主站和直链 dl.wenjin.jp 同一路径）
+WEBVIEW_ALT_SHA=ae42c47db7bc99b8d676ec24d67f2c4982153f214bab051372c9c210747dab4f
+WEBVIEW_ALT_SIZE=45094529
+WEBVIEW_ALT_APK_SHA=5158f50ab9e73241ae5534fde8fee9ea6d81d65e8e781a0750eb2cfe0445c902
+WEBVIEW_ALT_APK_SIZE=83155175
+WEBVIEW_ALT_OV_SHA=05e890d2df8efb867df2040272a192befd0b86ed51b6f58d4da09220fa524323
+WVD=$VD/webview-alt
+webview_ok() {   # 下好的包可用：大小对、覆盖包在、下载时核对过的 sha256 记录（ok）和钉死的一样。开机不重算 80 MB 的 sha256
+    [ -f $WVD/app/webview.apk ] && [ "$(webview_fsize $WVD/app/webview.apk)" = $WEBVIEW_ALT_APK_SIZE ] && [ -s $WVD/overlay/webview-alt-overlay.apk ] &&
+        [ "$(cat $WVD/ok 2>/dev/null)" = "$WEBVIEW_ALT_APK_SHA $WEBVIEW_ALT_APK_SIZE" ]
+}
+webview_mode() {
+    [ "${WEBVIEW:-stock}" = alt ] && webview_ok && ! lowmem_ram && { echo alt; return; }
+    echo stock
+}
+webview_profiles() {   # $1 = 上次用的内核，$2 = 这次的（stock | alt）。Android 没有运行时调用
+    for wp_p in $SYS/data/data/*; do
+        [ -d "$wp_p" ] || continue
+        wp_d=$wp_p/app_webview
+        if [ -d $wp_d ]; then
+            rm -rf $wp_p/app_webview.vd-$1
+            mv $wp_d $wp_p/app_webview.vd-$1 || continue
+        fi
+        [ -d $wp_p/app_webview.vd-$2 ] && mv $wp_p/app_webview.vd-$2 $wp_d
+        # WebView 记着上次用的版本号（shared_prefs/WebViewChromiumPrefs.xml 的 lastVersionCodeUsed）；版本变低就把整个
+        # app_webview 清空（日志 "WebView package downgraded from 604514100 to 275610000; deleting contents"，模拟器实测）。
+        # 换回 52 前删掉这个记录，放回去的那份数据才留得住。
+        [ "$2" = stock ] && rm -f $wp_p/shared_prefs/WebViewChromiumPrefs.xml
+    done
+    return 0
+}
+webview_purge() {   # 用户关掉了开关、已经换回 52：删掉下载的包、没下完的部分和 119 的网页数据
+    wpg_n=0
+    for wpg_d in $SYS/data/data/*/app_webview.vd-alt; do [ -d "$wpg_d" ] || continue; rm -rf "$wpg_d"; wpg_n=$((wpg_n + 1)); done
+    if [ -e $WVD ] || [ -e $WVD.new ] || [ -e $WVD.dl ] || [ $wpg_n -gt 0 ]; then
+        rm -rf $WVD $WVD.new $WVD.dl
+        t "webview: switched off: downloaded WebView 119 and $wpg_n apps' 119 web data removed"
+    fi
+    rm -f $X/ctl/webview.status 2>/dev/null
+    return 0
+}
+webview_prepare() {   # 宿主侧，container_start 里、启动容器之前
+    wv_m=$(webview_mode); wv_l=$(cat $SYS/webview.last 2>/dev/null); [ -n "$wv_l" ] || wv_l=stock
+    echo $wv_m > $W/webview.mode
+    if [ "$wv_m" != "$wv_l" ]; then
+        webview_profiles $wv_l $wv_m
+        # 上一个内核编好的代码（dalvik-cache）和 RELRO 对新包无效：删掉，Android 按新包重建
+        rm -f $SYS/data/dalvik-cache/arm/system@app@webview@webview.apk@classes.* $SYS/data/dalvik-cache/arm/system@vendor@app@webview-alt@*@classes.* 2>/dev/null
+        # zygote 的资源覆盖清单：换回 52 时覆盖包已经不在了（AssetManager 会跳过），还是删掉，下次开机按 /vendor/overlay 重新生成
+        rm -f $SYS/data/resource-cache/overlays.list $SYS/data/resource-cache/*vendor@overlay@* 2>/dev/null
+        rm -f $SYS/webview.svcoff      # 119 的后台服务关没关：换回 52 再换过来时重新关（afterboot.sh）
+        t "webview: $wv_l -> $wv_m (app_webview profiles swapped)"
+    fi
+    echo $wv_m > $SYS/webview.last
+    if [ "${WEBVIEW:-stock}" = alt ]; then
+        [ $wv_m = stock ] && t "webview: alt requested but not used ($(lowmem_ram && echo 512MB || echo 'WebView 119 not downloaded'))"
+    else
+        webview_purge
+    fi
+    # 桌面看的 WEBVIEW_LIVE：settings_publish 在 container_start 之前已经发过一次，那时还没定
+    [ -d "$X" ] && type settings_publish >/dev/null 2>&1 && settings_publish
+    return 0
+}
+webview_mount() {     # 容器里（run_in_ns），换根之前
+    [ "$(cat $W/webview.mode 2>/dev/null)" = alt ] || return 0
+    wm_v=$R/dev/vdvendor
+    if mkdir -p $wm_v/lib $wm_v/app/webview-alt $wm_v/overlay &&
+        { [ ! -d $R/system/vendor/lib ] || mount --bind $R/system/vendor/lib $wm_v/lib; } &&
+        mount --rbind $wm_v $R/system/vendor &&
+        mount --bind $WVD/app $R/system/vendor/app/webview-alt && mount -o remount,ro,bind $R/system/vendor/app/webview-alt 2>/dev/null &&
+        mount --bind $WVD/overlay $R/system/vendor/overlay && mount -o remount,ro,bind $R/system/vendor/overlay 2>/dev/null &&
+        [ -f $R/system/vendor/app/webview-alt/webview.apk ] && [ -f $R/system/vendor/overlay/webview-alt-overlay.apk ]; then   # /vendor 是指向 /system/vendor 的绝对链接：在宿主上看要走 $R/system
+        return 0
+    fi
+    for wm_m in $R/system/vendor/overlay $R/system/vendor/app/webview-alt $R/system/vendor/lib $R/system/vendor $wm_v/lib; do umount $wm_m 2>/dev/null; done
+    echo "veradroid: webview-alt not mounted, stock WebView" >&2
+    echo stock > $W/webview.mode
+    return 0
+}
+# ---- 下载（桌面打开开关时 settings_apply 调；命令 webview get / cancel）--------------------------------------------
+# 进度写 ctl/webview.status（KEY=value：state=downloading|verifying|ready|error|idle，got / total 字节，src，msg），桌面监听这个文件。
+# 先直链（dl.wenjin.jp，同一台服务器、不经过 Cloudflare），再主站；network.conf 的 VD_BASE / VD_DIRECT / VD_PROXY / VD_IP / VD_DNS 同 auto-update.sh。
+# 断点续传（curl -C -）；整个 tar.gz 和里面的 APK 都对钉死的 sha256，对不上就删掉换下一个来源。
+webview_status() { [ -d $X/ctl ] || return 0; { printf '%s\n' "$@"; echo "time=$(date +%s)"; } > $X/ctl/webview.status.tmp 2>/dev/null && mv -f $X/ctl/webview.status.tmp $X/ctl/webview.status; }
+webview_fsize() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi; }
+webview_dl_busy() { [ -n "$(cat $W/webview.dl.pid 2>/dev/null)" ] && kill -0 "$(cat $W/webview.dl.pid)" 2>/dev/null; }
+webview_urls() { ( # network.conf（VD_BASE / VD_DIRECT）：宿主的主进程不读它，auto-update.sh 也是自己读
+    BASE=; [ -f "$VD/network.conf" ] && . "$VD/network.conf"
+    # 主站：VD_BASE（安装器用的名字）或 BASE（auto-update.sh 用的名字），都没有就是正式站
+    wu_b=${VD_BASE:-${BASE:-https://veradroid.wenjin.jp}}; wu_b=${wu_b%/}
+    case "$wu_b" in https://veradroid.wenjin.jp) wu_d=${VD_DIRECT-https://dl.wenjin.jp} ;; *) wu_d=${VD_DIRECT-} ;; esac
+    wu_q="bundles/$WEBVIEW_ALT_FILE?v=$(echo $WEBVIEW_ALT_SHA | cut -c1-8)"
+    [ -n "$wu_d" ] && echo "${wu_d%/}/$wu_q"
+    echo "$wu_b/$wu_q" ); }
+webview_curl_opts() {
+    [ -f "$VD/network.conf" ] && ( . "$VD/network.conf"; o=; [ -n "${VD_PROXY:-}" ] && o="$o -x $VD_PROXY"
+        [ -n "${VD_IP:-}" ] && o="$o --resolve veradroid.wenjin.jp:443:$VD_IP"; [ -n "${VD_DNS:-}" ] && o="$o --dns-servers $VD_DNS"; echo "$o" )
+}
+webview_dl() {   # 后台跑（settings_apply / 命令）。已经在下、已经下好、512 MB 机型：什么都不做
+    lowmem_ram && { webview_status state=error msg=小内存机型不提供新网页内核; return 0; }
+    webview_ok && { webview_status state=ready total=$WEBVIEW_ALT_SIZE got=$WEBVIEW_ALT_SIZE; return 0; }
+    webview_dl_busy && return 0
+    ( webview_dl_run ) </dev/null >>$LOG 2>&1 &
+    echo $! > $W/webview.dl.pid
+    return 0
+}
+webview_dl_run() {
+    trap 'rm -f $W/webview.dl.pid' EXIT
+    t "webview: download $WEBVIEW_ALT_FILE ($WEBVIEW_ALT_SIZE bytes)"
+    mkdir -p $WVD.dl || { webview_status state=error msg=建不了下载目录; return 0; }
+    wd_f=$WVD.dl/$WEBVIEW_ALT_FILE
+    # 空间：tar.gz + 解开的 APK，再留 50 MB
+    wd_have=$(df -k $VD 2>/dev/null | awk 'NR==2 {print $4}'); wd_got=$(webview_fsize $wd_f)
+    if [ -n "$wd_have" ] && [ $(( wd_have * 1024 )) -lt $(( WEBVIEW_ALT_SIZE - wd_got + WEBVIEW_ALT_APK_SIZE + 52428800 )) ]; then
+        webview_status state=error msg="空间不够（要约 $(( (WEBVIEW_ALT_SIZE + WEBVIEW_ALT_APK_SIZE) / 1048576 + 50 )) MB）"; return 0
+    fi
+    wd_ok=; wd_err=
+    for wd_u in $(webview_urls); do
+        wd_src=${wd_u#*://}; wd_src=${wd_src%%/*}
+        webview_status state=downloading got=$wd_got total=$WEBVIEW_ALT_SIZE src=$wd_src
+        # shellcheck disable=SC2046
+        curl $(webview_curl_opts) -fsSL -C - --connect-timeout 10 --speed-limit 2048 --speed-time 60 --max-time 3600 -o $wd_f "$wd_u" 2>>$WVD.dl/curl.err &
+        wd_c=$!
+        while kill -0 $wd_c 2>/dev/null; do
+            sleep 2; wd_got=$(webview_fsize $wd_f)
+            webview_status state=downloading got=${wd_got:-0} total=$WEBVIEW_ALT_SIZE src=$wd_src
+            [ -f $W/webview.dl.cancel ] && { kill $wd_c 2>/dev/null; rm -rf $WVD.dl $W/webview.dl.cancel; webview_status state=idle; t "webview: download cancelled"; return 0; }
+        done
+        wait $wd_c; wd_rc=$?
+        wd_got=$(webview_fsize $wd_f)
+        if [ "${wd_got:-0}" = $WEBVIEW_ALT_SIZE ]; then
+            webview_status state=verifying got=$wd_got total=$WEBVIEW_ALT_SIZE src=$wd_src
+            if [ "$(sha256sum $wd_f | cut -c1-64)" = $WEBVIEW_ALT_SHA ]; then wd_ok=$wd_src; break; fi
+            t "webview: $wd_src: sha256 mismatch, removed"; rm -f $wd_f; wd_got=0; wd_err=校验不对
+        else
+            t "webview: $wd_src: curl rc=$wd_rc, $wd_got of $WEBVIEW_ALT_SIZE bytes"
+            # 比应有的大 / 服务器不支持续传：从头来
+            [ "${wd_got:-0}" -gt $WEBVIEW_ALT_SIZE ] 2>/dev/null && { rm -f $wd_f; wd_got=0; }
+            wd_err="下载失败（$wd_src）"
+        fi
+    done
+    [ -n "$wd_ok" ] || { webview_status state=error got=${wd_got:-0} total=$WEBVIEW_ALT_SIZE msg="${wd_err:-下载失败}，可以再试一次（会接着下）"; return 0; }
+    rm -rf $WVD.new && mkdir -p $WVD.new && tar xzf $wd_f -C $WVD.new 2>>$LOG &&
+        [ "$(sha256sum $WVD.new/app/webview.apk 2>/dev/null | cut -c1-64)" = $WEBVIEW_ALT_APK_SHA ] &&
+        [ "$(sha256sum $WVD.new/overlay/webview-alt-overlay.apk 2>/dev/null | cut -c1-64)" = $WEBVIEW_ALT_OV_SHA ] &&
+        echo "$WEBVIEW_ALT_APK_SHA $WEBVIEW_ALT_APK_SIZE" > $WVD.new/ok &&
+        chmod 755 $WVD.new $WVD.new/app $WVD.new/overlay && chmod 644 $WVD.new/app/webview.apk $WVD.new/overlay/webview-alt-overlay.apk || {
+            rm -rf $WVD.new $WVD.dl; webview_status state=error msg=解包或校验失败; t "webview: unpack / apk sha256 failed"; return 0; }
+    rm -rf $WVD && mv $WVD.new $WVD && rm -rf $WVD.dl
+    t "webview: WebView $WEBVIEW_ALT_VER ready (from $wd_ok), used from the next Android start"
+    webview_status state=ready got=$WEBVIEW_ALT_SIZE total=$WEBVIEW_ALT_SIZE src=$wd_ok
+    type settings_publish >/dev/null 2>&1 && settings_publish
+    return 0
+}
+webview_cmd() {   # webview get | cancel
+    case "$1" in
+        get) webview_dl ;;
+        cancel) webview_dl_busy && touch $W/webview.dl.cancel ;;
+    esac
+}
 container_start() {
+    webview_prepare       # 网页内核（WEBVIEW=alt，run_in_ns 绑进去）
     alarmfix_prepare      # AlarmManager 的 timerfd（run_in_ns 绑进去）
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
     fstrim_defuse
@@ -515,6 +714,8 @@ run_in_ns() {
         sysfont_mount        # 系统字体（SYSTEM_FONT）：上面 sysfont_prepare 准备好的才绑
         sysbin_wrap_mount    # dex2oat / cmd 的包装（boot/*-wrap.sh）
         alarmfix_mount       # AlarmManager 的 timerfd（alarmfix_prepare 改好的副本）
+        nocap_mount          # healthd 不带 CAP_BLOCK_SUSPEND / CAP_WAKE_ALARM（冻结时不挂唤醒源，待机能休眠）
+        webview_mount        # 新网页内核（webview_prepare 选好的）
         # /sdcard -> /storage/self/primary -> /storage/emulated/0. vold/FUSE
         # replaces /storage/emulated and filters by sdcard_rw group; KOReader
         # then gets EACCES on books. Drop that FUSE view and bind the ext4

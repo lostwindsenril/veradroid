@@ -457,14 +457,16 @@ final class Blocks {
     }
 
     /**
-     * 别的应用上面的状态栏（StatusBarService，18dp 高，盖在窗口上面）在这一页会不会显示：显示的话内容从它下面开始。
+     * 别的应用上面的状态栏（StatusBarService，盖在窗口上面）在这一页会不会显示：显示的话内容从它下面开始。
      * 这几页自己在 onResume 里把状态栏藏起来了（setSuppressed），不用让。
+     * 状态栏的占位窗口在的时候，系统已经把顶部让出来了（窗口的 inset），这里不能再让一次。
      */
     static int statusInset(android.app.Activity a) {
         if (a instanceof StatsActivity || a instanceof StorageActivity || a instanceof BackupActivity || a instanceof StoreActivity || a instanceof FontStoreActivity || a instanceof InboxActivity
             || a instanceof TransferActivity || a instanceof HomeActivity) return 0;
         try { if (!Store.prefs(a, "home").getBoolean("statusbar", true)) return 0; } catch (Throwable ignored) { }
-        return dp(a, 18);
+        if (StatusBarService.reserving()) return 0;
+        return StatusBarService.height(a);
     }
 
     /**

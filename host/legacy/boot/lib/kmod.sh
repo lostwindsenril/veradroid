@@ -7,6 +7,11 @@
 #                                                          uname-v 是那个内核的 `uname -v`，完全一致才加载。
 #                                                          uname-v 可以有多行：同一组固件（config 和全部导出 CRC 都相同、只有编译时间不同）
 #                                                          共用一份模块，每行一个固件的 `uname -v`
+#   $VD/kmod/extra/<uname -r>/<编号>/zram.ko                 可选模块（0.8.14 起）：4.1.15 的 5.14.1 – 5.15.1.1 固件内核没编 zram
+#                                                          （5.16.2.1 起亚马逊编进内核了）。zram.ko 里带着 zsmalloc，压缩用内核自带的 LZO
+#                                                          （tools/kmod/build-zram41.sh）。放在套件目录外面：套件的编号（kmod.sets）和
+#                                                          kmod.id 都不变，0.8.13 及以前的自动更新照常。
+#                                                          只在选中的套件就是 <编号> 时加载；加载失败只记日志，不影响启动。
 # 内核换了（固件升级）而没有对应的模块时一律不加载：宁可起不来（有提示），也不把按别的内核编的模块塞进去。
 # 设备节点已经存在的就不加载；模块不会卸载（下次启动直接复用）。
 kmod_dir() {
@@ -47,6 +52,12 @@ kmod_load() {
         fi
         if insmod "$ko" $a 2>>$LOG; then t "kmod: loaded $m (${ko##*/})"; else t "kmod: insmod ${ko##*/} failed"; fi
     done
+    # 可选模块（只有 4.1 的套件有）：ZRAM_MB=0 时不加载
+    x=$VD/kmod/extra/$(uname -r)/${d##*/}
+    if [ "$d" != "$VD/kmod/$(uname -r)" ] && [ -f "$x/zram.ko" ] && [ "${ZRAM_MB:-0}" -gt 0 ] 2>/dev/null \
+       && ! grep -q '^zram ' /proc/modules && [ ! -e /sys/block/zram0 ]; then
+        if insmod "$x/zram.ko" num_devices=1 2>>$LOG; then t "kmod: loaded zram (extra/${d##*/})"; else t "kmod: insmod extra/${d##*/}/zram.ko failed"; fi
+    fi
     # 没有 devtmpfs 自动建节点时，按 /proc/misc 里的次设备号补建（misc 主设备号 10）
     for n in vndbinder:vndbinder tun:net/tun uinput:uinput; do
         name=${n%%:*}; node=/dev/${n#*:}

@@ -24,6 +24,9 @@ ST_STEP=512          # 自动扩容一次扩多少 MB
 ST_FATCAP=4095       # FAT 上单个文件的上限（4 GB - 1 字节）
 ST_HARDMAX=32768     # 再大没有意义
 ST_MINIMUM=768       # 不管用了多少，最小也不低于这个
+# 启动时把太小 / 快满的镜像离线扩到合适大小（sysgrow.sh；st_recover 收尾后调 sg_start_grow，看门狗调 sg_low_tick）
+[ -f "$VD/boot/lib/sysgrow.sh" ] && . "$VD/boot/lib/sysgrow.sh"
+sg_hook() { [ -n "$ST_START" ] && [ -z "$ST_OWNER" ] && type sg_start_grow >/dev/null 2>&1 && sg_start_grow; return 0; }
 
 st_log() { echo "[$(date '+%F %T')] $*" >> $ST_LOG 2>/dev/null; type t >/dev/null 2>&1 && t "storage: $*" >&2; return 0; }
 # 工具：固件自带的优先（和固件的内核、文件系统特性是一套），没有才用整包里带的静态版
@@ -205,7 +208,7 @@ st_recover() {
     for st_f in resize.state resize.pending; do   # root-legacy: 老版本记在根目录的“进行中 / 待扩容”标记
         [ -f /mnt/base-us/veradroid-$st_f ] && [ ! -e /mnt/base-us/veradroid/state/$st_f ] && mv -f /mnt/base-us/veradroid-$st_f /mnt/base-us/veradroid/state/$st_f   # root-legacy
     done
-    [ -f $ST_STATE ] || [ -f $ST_PENDING ] || return 0
+    [ -f $ST_STATE ] || [ -f $ST_PENDING ] || { sg_hook; return 0; }
     [ -n "$ST_OWNER" ] && return 0                     # 调整流程自己（resize.sh）：它知道自己在做什么
     if [ -f $ST_STATE ]; then
         op=$(sed -n 's/^op=//p' $ST_STATE | tr -cd 'a-z'); from=$(sed -n 's/^from=//p' $ST_STATE | tr -cd '0-9')
@@ -231,7 +234,9 @@ st_recover() {
             # 扩大：文件加长到一半就把它加完（空间还够的话），再把文件系统补上
             if [ "$(st_img_mb)" -lt "$to" ]; then
                 kf=$(df -kP /mnt/base-us 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1024 }')
-                if st_isfat && [ $((to - $(st_img_mb) + ST_KEEP)) -gt "${kf:-0}" ]; then :; else st_extend "$to"; fi
+                if st_isfat && [ $((to - $(st_img_mb) + ST_KEEP)) -gt "${kf:-0}" ]; then :
+                elif type sg_extend >/dev/null 2>&1; then sg_extend "$to"   # 分块写、每块落盘（FAT 上一次加几百 MB 会卡死小内存机器）
+                else st_extend "$to"; fi
             fi
             if st_needs_fill; then st_fill; st_fsck; fi
             rm -f $ST_STATE; st_last ok grow "$from" "$(( $(st_fs_kb || echo 0) / 1024 ))" finished-after-interruption
@@ -255,6 +260,7 @@ st_recover() {
             rm -f $ST_STATE
         fi
     fi
+    sg_hook
     return 0
 }
 
@@ -316,6 +322,7 @@ st_request() {
 st_auto_tick() {
     [ -f "$SYSTEM_IMG" ] || return 0
     st_notify_flush
+    type sg_low_tick >/dev/null 2>&1 && sg_low_tick
     st_auto_on || return 0
     [ -d $ST_LOCK ] && return 0
     [ -f $ST_PENDING ] && return 0
@@ -362,6 +369,7 @@ st_cmd() {
             touch $SYS/settings.conf
             grep -v "^STORAGE_AUTO=" $SYS/settings.conf > $SYS/settings.conf.tmp 2>/dev/null
             echo "STORAGE_AUTO=$v" >> $SYS/settings.conf.tmp; mv -f $SYS/settings.conf.tmp $SYS/settings.conf
+            echo $v > /mnt/base-us/veradroid/state/storage.auto 2>/dev/null   # 系统盘外的一份：启动前（镜像没挂）sysgrow.sh 要看
             [ $v = 0 ] && rm -f $ST_PENDING
             st_log "auto grow $v"; st_cmd info ;;
     esac

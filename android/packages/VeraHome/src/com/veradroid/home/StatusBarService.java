@@ -27,12 +27,19 @@ import java.util.Locale;
  * Kindle 风格的状态栏：顶部一条很窄的白条，左边时间、右边电量，点一下打开下拉面板。
  * 只在“设置 → 桌面 → 状态栏”打开时显示；桌面和面板自己已经有顶栏，所以它们在前台时隐藏。
  * 用 TYPE_PHONE 覆盖在别的 App 上；需要 SYSTEM_ALERT_WINDOW（安装后用 appops 放行）。
+ *
+ * 让位：容器里没有 SystemUI，系统以为顶上没有状态栏，应用拿到的顶部 inset 是 0，这一条就盖在应用上面
+ * （微信读书书架这类“沉浸式状态栏”页面：搜索框被时间压住）。所以另外加一个看不见、不接触摸的 TYPE_STATUS_BAR 窗口，
+ * 系统就按真的状态栏给应用留出 status_bar_height（各机型按自己的密度换算）；这一条也用同样的高度，正好盖住让出来的那一截。
+ * 全屏的应用（阅读页）系统自己把这个占位窗口藏起来，不让位，和以前一样只盖一条。
  */
 public class StatusBarService extends Service {
     private static final String TAG = "VeraStatusBar";
     private static boolean suppressed = false;   // Home / Panel 在前台时为 true
     private WindowManager wm;
     private View bar;
+    private View reserve;                       // 看不见的 TYPE_STATUS_BAR：只为让系统给应用留出顶部
+    private static volatile boolean reserving;  // 占位窗口在：别的页面不用自己再让（Blocks.statusInset）
     private TextView clock, batt;
     private final Handler handler = new Handler();
     private final Runnable tick = new Runnable() {
@@ -55,6 +62,18 @@ public class StatusBarService extends Service {
     public static void stop(Context c) { c.stopService(new Intent(c, StatusBarService.class)); }
     public static void setSuppressed(boolean v) { suppressed = v; }
     public static void refresh(Context c) { c.startService(new Intent(c, StatusBarService.class)); }
+    /** 系统按真的状态栏给应用留出顶部了（占位窗口加上了）。 */
+    static boolean reserving() { return reserving; }
+
+    /** 状态栏高度：系统的 status_bar_height（24dp，按各机型的显示密度换算），拿不到时 24dp。 */
+    static int height(Context c) {
+        try {
+            android.content.res.Resources r = android.content.res.Resources.getSystem();
+            int id = r.getIdentifier("status_bar_height", "dimen", "android");
+            if (id != 0) { int h = r.getDimensionPixelSize(id); if (h > 0) return h; }
+        } catch (Throwable ignored) { }
+        return Ui.dp(c, 24);
+    }
 
     @Override public IBinder onBind(Intent i) { return null; }
     @Override public int onStartCommand(Intent i, int flags, int startId) {
@@ -107,6 +126,18 @@ public class StatusBarService extends Service {
     }
 
     private boolean builtBlocks;
+    private int builtHeight;
+
+    /**
+     * 显示密度变了（appprof.sh 给多看这类应用临时换密度）：系统按新密度的 status_bar_height 让位，
+     * 这一条也按新高度重搭，不然让出来的那一截有一段没盖住（应用自己的状态栏底色露出来）。
+     */
+    @Override public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        if (bar == null || height(this) == builtHeight) return;
+        removeBar();   // 只换这一条；占位窗口留着改高度（系统里只能有一个状态栏窗口，撤了马上再加会被拒）
+        refreshNow();
+    }
 
     private void show() {
         if (bar != null) return;
@@ -126,7 +157,7 @@ public class StatusBarService extends Service {
         for (TextView tv : new TextView[] { clock, batt }) { tv.getPaint().setAntiAlias(false); tv.getPaint().setSubpixelText(false); }
         row.addView(clock, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
         row.addView(batt, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
-        // 状态栏只有 20dp 高。以前用 14dp 的线条箭头（﹀）：线只有 2 像素，墨水屏抖动后又淡又细，看起来像残缺的，
+        // 状态栏只有 20dp 高（现在是系统的 status_bar_height，24dp）。以前用 14dp 的线条箭头（﹀）：线只有 2 像素，墨水屏抖动后又淡又细，看起来像残缺的，
         // 还贴着屏幕右边。改成实心倒三角 ▼（14dp 宽、8dp 高），离右边 10dp；整行仍然都能点开面板。
         View chev = new View(this) {
             private final android.graphics.Paint fill = new android.graphics.Paint();   // 不抗锯齿，理由同上
@@ -171,10 +202,13 @@ public class StatusBarService extends Service {
                 return false;
             }
         });
-        wrap.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, builtBlocks ? dp(18) - Blocks.stroke(this) : dp(18)));
+        int h = height(this);
+        builtHeight = h;
+        wrap.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, builtBlocks ? h - Blocks.stroke(this) : h));
         if (builtBlocks) wrap.addView(Ui.rule(this, Blocks.stroke(this), Color.BLACK));
+        addReserve(h);
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(18),
+                LinearLayout.LayoutParams.MATCH_PARENT, h,
                 WindowManager.LayoutParams.TYPE_PHONE,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -187,13 +221,56 @@ public class StatusBarService extends Service {
         } catch (Throwable t) {
             Log.w(TAG, "cannot add status bar: " + t);
             bar = null;
+            hide();   // 这一条没加上：占位窗口也撤掉，不然应用顶上空一截
         }
     }
 
-    private void hide() {
+    /**
+     * 占位窗口：TYPE_STATUS_BAR（要 STATUS_BAR_SERVICE，平台签名有），透明、不接触摸、不拿焦点。
+     * 系统里只能有一个状态栏窗口；容器里没有 SystemUI，所以这里能加上。加不上（老镜像 / 没有权限）就和以前一样只盖一条。
+     */
+    private void addReserve(int h) {
+        if (reserve != null) {
+            try {
+                WindowManager.LayoutParams rl = (WindowManager.LayoutParams) reserve.getLayoutParams();
+                if (rl.height != h) { rl.height = h; wm.updateViewLayout(reserve, rl); }
+            } catch (Throwable ignored) { }
+            return;
+        }
+        View v = new View(this);
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT, h,
+                WindowManager.LayoutParams.TYPE_STATUS_BAR,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSPARENT);
+        lp.gravity = Gravity.TOP | Gravity.LEFT;
+        lp.windowAnimations = 0;
+        lp.setTitle("VeraStatusReserve");
+        try {
+            wm.addView(v, lp);
+            reserve = v;
+            reserving = true;
+        } catch (Throwable t) {
+            Log.w(TAG, "status bar reserve not added (apps keep the full height): " + t);
+        }
+    }
+
+    private void removeBar() {
         if (bar == null) return;
         try { wm.removeView(bar); } catch (Throwable ignored) { }
         bar = null;
+    }
+
+    private void hide() {
+        removeBar();
+        if (reserve != null) {
+            // 马上撤（removeView 是异步的）：紧接着再 show 时系统里还有旧的状态栏窗口，新的会被拒
+            try { wm.removeViewImmediate(reserve); } catch (Throwable ignored) { }
+            reserve = null;
+        }
+        reserving = false;
     }
 
     private void openPanel() {

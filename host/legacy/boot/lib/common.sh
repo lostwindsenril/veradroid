@@ -49,8 +49,57 @@ loop_dev() { # loopN -> 设备节点（有的机型只有 /dev/loop/N）
     n=${1#loop}
     [ -b /dev/loop$n ] && echo /dev/loop$n || echo /dev/loop/$n
 }
+# 占着系统盘镜像（这些 loop 上的文件系统）的进程：打开的文件、当前目录、根目录、映射的程序 / 库。一行一个 pid（不含自己和祖先）。
+img_holders() { # loopN...
+    ih_maps=; ih_devs=
+    for l in "$@"; do
+        d=$(cat /sys/block/$l/dev 2>/dev/null) || continue
+        ma=${d%%:*}; mi=${d##*:}
+        ih_maps="$ih_maps $(printf '%02x:%02x' $ma $mi)"
+        ih_devs="$ih_devs $(printf '%x' $(( (ma << 8) | (mi & 255) | ((mi & ~255) << 12) )))"
+    done
+    [ -n "$ih_maps" ] || return 0
+    ih_anc=" $$ "; a=$$
+    while [ -n "$a" ] && [ "$a" -gt 1 ] 2>/dev/null; do a=$(awk '/^PPid:/ {print $2}' /proc/$a/status 2>/dev/null); ih_anc="$ih_anc$a "; done
+    for d in /proc/[0-9]*; do
+        n=${d#/proc/}
+        case "$ih_anc" in *" $n "*) continue ;; esac
+        h=
+        for x in $ih_maps; do grep -q " $x " $d/maps 2>/dev/null && { h=1; break; }; done
+        if [ -z "$h" ]; then
+            for f in $d/cwd $d/root $d/fd/*; do
+                fd=$(stat -L -c %D "$f" 2>/dev/null) || continue
+                case " $ih_devs " in *" $fd "*) h=1; break ;; esac
+            done
+        fi
+        [ -n "$h" ] && echo "$n"
+    done
+}
+# 结束占着系统盘的残留进程、卸掉这些 loop 的残留挂载（只在 Android 没在运行时）。storage_mount 摘 loop 摘不掉时调用。
+img_release() { # loopN...
+    [ $# -gt 0 ] || return 0
+    rp=$(cat $W/pid 2>/dev/null)
+    if [ -n "$rp" ] && kill -0 "$rp" 2>/dev/null; then t "storage: image still attached and android (pid $rp) is running: not touching it"; return 0; fi
+    hl=$(img_holders "$@")
+    # 书库启动时这一段还在第一阶段，输出接的是启动器的管道：同时记进系统盘外面的 start.log
+    mkdir -p /mnt/base-us/veradroid/logs 2>/dev/null
+    { echo "[$(date '+%Y-%m-%d %H:%M:%S')] storage: system image still attached to $*; holders: $(for p in $hl; do printf '%s(%s) ' $p "$(tr '\000' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-60)"; done)"; } >> "${VD_START_LOG:-/mnt/base-us/veradroid/logs/start.log}" 2>/dev/null
+    for p in $hl; do t "storage: pid $p still holds the system image: $(tr '\000' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-120), ending it"; kill -CONT $p 2>/dev/null; kill $p 2>/dev/null; done
+    if [ -n "$hl" ]; then
+        k=0; while [ $k -lt 20 ]; do a=; for p in $hl; do kill -0 $p 2>/dev/null && a=1; done; [ -n "$a" ] || break; usleep 100000; k=$((k + 1)); done
+        for p in $hl; do kill -9 $p 2>/dev/null; done
+    fi
+    for l in "$@"; do
+        awk -v d="$(loop_dev $l)" -v e="/dev/$l" '$1 == d || $1 == e {print length($2), $2}' /proc/mounts | sort -rn | while read -r _ m; do
+            umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null; t "storage: dropped a leftover mount of the system image at $m"
+        done
+    done
+    [ -n "$hl" ] || t "storage: system image still attached to $* but no process holds it"
+    return 0
+}
 storage_mount() {
     [ -f "$SYSTEM_IMG" ] || return 0
+    type sg_premount >/dev/null 2>&1 && sg_premount     # sysgrow.sh：更新后还挂着、又该扩容时先卸下来（只在启动 Android 时）
     if grep -q " $SYS " /proc/mounts; then
         # 安装器（旧版）挂的可能没带 user_xattr：补上（remount 不影响正在用的文件）
         case "$LOOPOPT" in *user_xattr*) grep " $SYS " /proc/mounts | grep -q user_xattr || mount -o remount,user_xattr "$SYS" 2>/dev/null ;; esac
@@ -65,7 +114,11 @@ storage_mount() {
     while [ -n "$(img_loops)" ]; do
         for l in $(img_loops); do losetup -d "$(loop_dev $l)" 2>/dev/null; done
         [ -z "$(img_loops)" ] && break
-        i=$((i + 1)); [ $i -ge 25 ] && { t "storage: system image still attached to $(img_loops | tr '\n' ' ')(previous run not finished)"; return 1; }
+        # 摘不掉 = 还有进程占着镜像里的文件（上次退出没收干净的子进程、没死透的 Android 进程）。以前只是等 5 秒然后不启动，
+        # 而这时 Kindle 界面在前台、提示被书库重画盖掉：用户看到的是“正在打开”之后什么都没有，只有重启 Kindle 才好
+        # （pw5-5192 模拟器用一个占着镜像的 loop 复现）。Android 没在运行时，占着我们自己系统盘的只可能是 VeraDroid 的残留：结束它们再摘。
+        [ $i = 3 ] && img_release $(img_loops)
+        i=$((i + 1)); [ $i -ge 25 ] && { t "storage: system image still attached to $(img_loops | tr '\n' ' ')(previous run not finished; holders: $(img_holders $(img_loops) | tr '\n' ' '))"; return 1; }
         usleep 200000
     done
     # 上次调整大小没做完（断电 / 被杀）、或者留了“下次启动时扩容”：先收尾（storage.sh）。别的进程正在调整就不挂。
@@ -91,6 +144,22 @@ storage_mount() {
 # 预编译工作进程留下的 sleep、看守循环等。不杀掉系统盘就卸不掉（rl-pw4：返回 Kindle 后系统盘一直挂着）。
 # 只动 VeraDroid 自己的：命令行里有 $VD/boot/ 的 shell（后台函数的子 shell 命令行和父进程一样），以及 sleep / usleep；
 # 不动本脚本和它的祖先（看门狗 / 安装器调 stop.sh 时它们在等我们）。
+# ls -l 的输出里有指向 $SYS 本身或 $SYS/ 下面的链接（cwd / root / fd）。双引号里的 \$ 交给 grep 的是 $（行尾锚点），
+# 所以“正好等于 $SYS”也算（社区报告以为是字面的美元符：他的复现用的是单引号；tests/legacy-robust-1120-test.sh 按原样核对三种情况）
+sys_link_hit() { grep -q -- "-> $SYS\(/\|\$\)"; }
+# 这台机器的 grep 能不能在 /proc/*/cmdline（参数之间是 NUL）里找到后面参数里的字符串。结果记在 SK_GREP_NUL
+sk_grep_nul() {
+    if [ -z "${SK_GREP_NUL:-}" ]; then
+        SK_GREP_NUL=no; sk_t=/tmp/.vd-nulprobe.$$
+        printf 'sh\000%s/boot/x.sh\000' "$VD" > $sk_t 2>/dev/null && grep -q -e "$VD/boot/" $sk_t 2>/dev/null && SK_GREP_NUL=yes
+        rm -f $sk_t
+    fi
+    [ "$SK_GREP_NUL" = yes ]
+}
+# 是 VeraDroid 自己的进程（命令行里有 $VD/boot/ 的 shell，或 sleep / usleep）。$1 = NUL 换成空格的命令行
+sk_ours() { case "$1" in *"$VD/boot/"*|sleep\ *|usleep\ *|/bin/sleep\ *) return 0 ;; esac; return 1; }
+# 候选：sk_ours 可能成立的 cmdline 文件（条件比 sk_ours 宽：^sleep 也收 “sleepX”，只多不少）
+sk_cands() { grep -l -e "$VD/boot/" -e '^sleep' -e '^usleep' -e '^/bin/sleep' "$@" 2>/dev/null; }
 sys_holders_kill() {
     sk_anc=" $$ "; sk_p=$$
     while [ -n "$sk_p" ] && [ "$sk_p" -gt 1 ] 2>/dev/null; do
@@ -98,12 +167,17 @@ sys_holders_kill() {
         sk_l=${sk_l##*) }; set -- $sk_l; sk_p=$2; sk_anc="$sk_anc$sk_p "
     done
     sk_k=
-    for sk_d in /proc/[0-9]*; do
-        sk_p=${sk_d#/proc/}
+    # 先用一次 grep -l 挑候选，不再对每个进程起一次 tr（单核老机器上一次 fork 约 10 ms，一百多个进程就是一两秒，
+    # 社区报告的 PW4 模拟器上整段 20 多秒）。预筛的条件比下面的 case 宽，杀不杀仍按原来的 case + ls 判断，判据不变。
+    # grep 要能越过 cmdline 里的 NUL（路径在第二个参数里）：sk_grep_nul 先拿样本试一次，不行就照旧逐个看。
+    if sk_grep_nul; then sk_ds=$(sk_cands /proc/[0-9]*/cmdline)
+    else sk_ds=$(echo /proc/[0-9]*); fi
+    for sk_d in $sk_ds; do
+        sk_d=${sk_d%/cmdline}; sk_p=${sk_d#/proc/}
         case "$sk_anc" in *" $sk_p "*) continue ;; esac
-        sk_c=$(tr '\000' ' ' < $sk_d/cmdline 2>/dev/null) || continue
-        case "$sk_c" in *"$VD/boot/"*|sleep\ *|usleep\ *|/bin/sleep\ *) ;; *) continue ;; esac
-        ls -l $sk_d/cwd $sk_d/root $sk_d/fd 2>/dev/null | grep -q -- "-> $SYS\(/\|\$\)" || continue
+        sk_c=$(tr '\000' ' ' 2>/dev/null < $sk_d/cmdline) || continue   # 2>/dev/null 写在 < 前面：进程刚退出时不往日志里刷 can't open
+        sk_ours "$sk_c" || continue
+        ls -l $sk_d/cwd $sk_d/root $sk_d/fd 2>/dev/null | sys_link_hit || continue
         kill -9 "$sk_p" 2>/dev/null && sk_k="$sk_k $sk_p:$(echo "$sk_c" | cut -c1-60)"
     done
     [ -n "$sk_k" ] && t "stop: killed leftover VeraDroid processes holding the system image:$sk_k"
@@ -217,6 +291,38 @@ vd_in() {
 [ -f "$VD/boot/lib/saver.sh" ] && . "$VD/boot/lib/saver.sh"         # 屏保挑选（桌面写的选择文件）
 case "$0" in */veradroid.sh) ST_START=1 ;; esac                    # 只有真正启动 Android 时才做“下次启动时扩容”
 splash() { [ -x "$FBINK" ] && "$FBINK" -q -c -m -M -t regular=$KFONT,px=${2:-44} "$1" 2>/dev/null; }
+# 没能启动 / 不启动时告诉用户为什么。书库点“启动”之后、Kindle 界面停下来之前出的错，屏幕上是书库和启动器的“正在打开”：
+# 以前用 splash 写一行，5 秒后脚本退出、书库重画就盖掉了（pw5-5192 模拟器上一帧都没截到）；中文交给 eips 根本画不出来。
+# 用户看到的就是“点了没反应”。现在：整屏写原因（中文 + 英文）和日志位置，每 5 秒重画、停留约 15 秒（启动器还开着，书库不重画），
+# 再把原因记进系统盘外面的 veradroid/logs/start.log（系统盘没挂上时 veradroid.log 写进挂载点下面的空目录，挂上后就看不到了）。
+VD_START_LOG=/mnt/base-us/veradroid/logs/start.log
+# 启动过程的关键一步记一行到 start.log（系统盘外面，USB 里 veradroid/logs/start.log 能看到；PW5 等机型的 veradroid.log 在系统盘镜像里，电脑上看不到）
+vd_slog() {
+    mkdir -p "${VD_START_LOG%/*}" 2>/dev/null
+    [ "$(wc -c < "$VD_START_LOG" 2>/dev/null || echo 0)" -gt 65536 ] && { tail -c 32768 "$VD_START_LOG" > "$VD_START_LOG.tmp" 2>/dev/null && mv -f "$VD_START_LOG.tmp" "$VD_START_LOG"; }
+    echo "[$(date '+%Y-%m-%d %H:%M:%S') up=$(cut -d' ' -f1 /proc/uptime)] $*" >> "$VD_START_LOG" 2>/dev/null
+    return 0
+}
+vd_notice() { # 中文 英文 [秒数，默认 15]
+    t "notice: $2"
+    vd_slog "NOT STARTED: $2 | $1"
+    vn_s=${3:-15}; vn_i=0
+    while :; do
+        if ! { [ -x "$FBINK" ] && "$FBINK" -q -c -m -M -t regular=$KFONT,px=36 "$1
+
+$2
+
+日志 log: veradroid/logs/start.log" 2>/dev/null; }; then
+            eips -c >/dev/null 2>&1; eips 1 3 "VeraDroid: $2" >/dev/null 2>&1; eips 1 6 "log: veradroid/logs/start.log" >/dev/null 2>&1
+        fi
+        [ $vn_i -ge $vn_s ] && break
+        sleep 5; vn_i=$((vn_i + 5))
+    done
+    return 0
+}
+# 启动 / 解冻锁的持有者还活着：pid 在，而且真是 veradroid.sh。锁目录在 tmpfs 里一直留到重启：持有者被杀掉以后，
+# 同一个 pid 号以后可能分给别的进程，只看 kill -0 会一直当成“正在启动”，每次点都被忽略。
+vd_lock_alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null && grep -q "boot/veradroid.sh" /proc/$1/cmdline 2>/dev/null; }
 storage_mount
 
 # 传书网页 / 商店 / 在线更新放安装包的暂存目录（Android 里是 /data/media/0/.upload，VeraHome 以普通应用 uid 写）。

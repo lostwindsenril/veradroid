@@ -140,3 +140,20 @@ slim_after_boot() {
     fi
 }
 
+
+# su 对应用藏起来（HIDE_SU=1，默认）。userdebug 镜像带 /system/xbin/su（AOSP 的 su 只认 root / shell，应用本来就用不了它），
+# 但加固应用（爱加密 ijiami 的 libijm_linker：which su、/system/xbin/ /system/bin/ /sbin/ ... 下找 su）看见它就当成 root 设备，
+# 原生壳 0.5–1.5 秒内故意 SIGSEGV 自杀，Android 无限重启它（不背单词 5.11.10，模拟器：有 su 12/12 次崩，改名后过了壳）。
+# 只改名不删：/system/xbin/vdsu（同一个 inode，增量更新按内容找得到它），HIDE_SU=0 改回去。宿主自己的工具都从 nsenter 以 root 进容器，
+# 不用 su；测试脚本用 vdsu。新镜像里又带了 su 时，开机前再改一次。
+su_hide() {
+    su_x=$R/system/xbin
+    [ -d "$su_x" ] || return 0
+    if [ "${HIDE_SU:-1}" = 1 ]; then
+        [ -f "$su_x/su" ] || return 0
+        mv -f "$su_x/su" "$su_x/vdsu" && t "su: hidden from apps (system/xbin/su -> vdsu)" || t "su: could not hide (read-only image?)"
+    else
+        [ -f "$su_x/vdsu" ] && [ ! -e "$su_x/su" ] && mv "$su_x/vdsu" "$su_x/su" && t "su: HIDE_SU=0, system/xbin/su put back"
+    fi
+    return 0
+}

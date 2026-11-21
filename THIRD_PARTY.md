@@ -21,6 +21,7 @@ VeraDroid 自己的代码是 GPL-3.0-or-later（见 `LICENSE`）。
 | Dropbear SSH | 2026.92（KOReader 构建） | MIT 式（含少量其他宽松许可） | 单独发布的 SSH 调试包 | 预编译二进制 |
 | e2fsprogs（e2fsck、resize2fs） | 1.47.1 | GPL-2.0-only（库部分 LGPL-2.1 / BSD / MIT） | `bin/e2fsck`、`bin/resize2fs`（调整系统镜像大小） | 官方源码 tarball 的静态编译，未修改；构建脚本 `tools/cross/build-e2fs.sh` |
 | Linux binder 驱动及其头文件 | AOSP `kernel/common` `deprecated/android-3.0`；NXP `rel_imx_3.0.35_4.1.0_ga_caf` | GPL-2.0-only | 老机型的外挂内核模块（由 `tools/kmod/` 构建，未入库） | 内核模块 |
+| Chromium WebView（可选的新网页内核，`com.embrith.webview`） | 119.0.6045.194 | BSD-3-Clause + 第三方组件各自的许可 | 不在安装包里：用户在“显示与刷新”打开时单独下载 `webview-alt-119.0.6045.194.tar.gz`，装到 `veradroid/webview-alt/` | 社区贡献者从源码编译（去掉 Google Play 服务客户端库），贡献者签名，未修改 |
 
 不随安装包分发、只在开发时使用的：eink-emulator（QEMU，测试用）、Docker 构建镜像里的 Ubuntu 软件包（以各自的许可为准）。
 
@@ -62,6 +63,20 @@ glibc 源码可从 Ubuntu 的源码包获取（`apt-get source glibc`，对应�
   分发系统镜像时，源码提供方式是：AOSP 上游标签 + 本仓库 `android/` 下的全部补丁。
 - 镜像使用 AOSP 自带的测试签名密钥（`build/target/product/security/`），见 `SECURITY.md`。
 - rootfs 里额外加入了当前的 Mozilla 根证书（MPL-2.0），因为 2016 年的根证书已过期或缺失。来源和时间点由构建者决定（`android/mk-rootfs.sh` 读取 `cacerts-extra/`）。
+
+### Chromium WebView 119（BSD-3-Clause 等）
+
+- 只在 1 GB 机型上、用户打开“显示与刷新 → 网页内核（实验）”时下载，不进安装包、不入库。
+- 构建：社区用户 momo 从 https://chromium.googlesource.com/chromium/src/+/refs/tags/119.0.6045.194 编译 `system_webview_apk`
+  （`target_cpu="arm"`、`is_official_build=true`、`proprietary_codecs=false`、`use_official_google_api_keys=false`、
+  `system_webview_package_name="com.embrith.webview"`），加了一个去掉 Google Play 服务客户端库的小补丁（定位、形状检测、
+  短信验证码三处改走不依赖 Play 服务的路径）。补丁和构建说明在下载包里（`chromium-nogms.patch`、`BUILD.txt`）。
+  APK 由贡献者签名（证书 CN=Embrith WebView，SHA-256 `2ca861e5b829f5aba0be12b7abfae4f38f99ac47b1204e47ca6d855f638ce58e`），本项目未修改。
+- 本项目自己的部分：framework 资源覆盖 `android/webview-alt/overlay`（把这个包列为 WebView 提供者），GPL-3.0-or-later。
+- 许可：Chromium 本体 BSD-3-Clause（下载包里的 `LICENSE.chromium`）；所含第三方组件的版权声明和许可全文在下载包的
+  `webview_licenses.notice`（Chromium `tools/licenses/licenses.py` 生成的 credits）。不含 Google Play 服务客户端库；没有 GPL 组件
+  （FFmpeg 以 Chromium 品牌、LGPL 部分编入，源码在上面的公开地址）。
+- “Chrome”“Chromium”是 Google 的商标，这里只作描述性使用。
 
 ### 霞鹜文楷（SIL OFL 1.1）
 

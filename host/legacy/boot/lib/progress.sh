@@ -319,8 +319,10 @@ vp_watch() {
 VP_TICK=
 vp_ticker_start() {
     vp_ticker_stop
+    # $$ 在子 shell 里仍是起它的那个脚本的 pid：脚本被硬杀（超时、SSH 断开）时 vp_ticker_stop 跑不到，
+    # 以前这个子 shell 就成了孤儿，每 5 秒 fork 一次直到 Kindle 重启（社区报告：PW4 模拟器一轮回归攒了 24 个）。父进程没了就退
     ( exp=${1:-60}; [ "$exp" -gt 0 ] 2>/dev/null || exp=60
-      while :; do
+      while [ -d /proc/$$ ]; do
           e=$(( $(vp_now) - VP_ST0 )); p=$((e * 100 / exp)); [ $p -gt 95 ] && p=95
           l2=$2; [ -n "${3:-}" ] && [ $e -gt $((exp * 2)) ] && l2=$3
           vp_progress $p "已用 $(vp_mmss $e) · 一般要 $(vp_mmss $exp) 左右" "$l2"

@@ -5,13 +5,21 @@
 # 2. vd_notice：写进系统盘外面的 start.log；fbink 不可用时退回 eips 英文。
 # 3. vd_lock_alive：锁里的 pid 活着但不是 veradroid.sh（pid 号被别的进程复用）= 残留锁。
 # 4. storage_mount 摘不掉 loop 时先 img_release；img_holders 的设备号换算和内核 new_encode_dev 一致。
-# host/k49 和 host/pw6 是同一套启动代码（fix/launch-silent-k49 移植到 pw6）：两份都查。
+# host/k49 和 host/pw6 是同一套启动代码（fix/launch-silent-k49 移植到 pw6）；老机型 host/legacy 移植了同样的改动
+# （fix/legacy-ashmem-launch）。仓库里有哪几份就查哪几份（老机型线的分支上 host/k49 / host/pw6 是旧的，没有这些改动）。
 set -eu
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 cd "$(dirname "$0")/.."
 if [ -z "${VD_LN_MODEL:-}" ]; then
-    for m in k49 pw6; do VD_LN_MODEL=$m sh "$SELF" || exit 1; done
-    echo "launch-notice: ok (k49, pw6)"; exit 0
+    ms=${VD_LN_MODELS:-}
+    if [ -z "$ms" ]; then
+        for m in k49 pw6 legacy; do grep -q '^vd_notice()' host/$m/boot/lib/common.sh 2>/dev/null && ms="$ms $m"; done
+        # 老机型线（host/legacy 是当前老机型版本）：legacy 一定要有
+        [ -d host/legacy ] && case " $ms " in *" legacy "*) ;; *) echo "FAIL (legacy): host/legacy/boot/lib/common.sh has no vd_notice"; exit 1 ;; esac
+    fi
+    [ -n "$ms" ] || { echo "FAIL: no host has vd_notice"; exit 1; }
+    for m in $ms; do VD_LN_MODEL=$m sh "$SELF" || exit 1; done
+    echo "launch-notice: ok ($(echo $ms | tr ' ' ','))"; exit 0
 fi
 fail() { echo "FAIL (${VD_LN_MODEL:-}): $*"; exit 1; }
 M=$VD_LN_MODEL; V=host/$M/boot/veradroid.sh; C=host/$M/boot/lib/common.sh; L=host/$M/VeraDroid-Launch.sh

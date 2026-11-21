@@ -28,7 +28,7 @@ for h in pw6 k49; do
     S=host/$h/boot/lib/settings.sh
     for k in $APPK BOOST_MS BOOST_KHZ SCROLL_PX; do
         grep -q "^    $k=" $S || fail "$S: no default for $k"
-        n=$(grep -c -E "GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE( USB_ASK)?( UPDATE_BACKUP)?; do" $S)
+        n=$(grep -c -E "GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE( USB_ASK)?( UPDATE_BACKUP)?( WEBVIEW)?; do" $S)
         [ "$n" = 2 ] || fail "$S: BOOST_MS / SCROLL_PX not in the publish / apply lists ($n)"
     done
     for k in $APPK; do

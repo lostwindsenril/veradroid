@@ -54,6 +54,19 @@ bw_release() {
     [ -f $W/bw.released ] || { touch $W/bw.released; splash_end; }
     rmdir $W/splash.lock 2>/dev/null; return 0
 }
+# 开机失败的记录（社区报告：第二次卡住时静默回到书库，屏幕上、USB 能看到的地方都没有原因）。
+# veradroid/state/boot-fail.log 每次失败一行（电脑上 USB 打开就能看），boot-fail.count 是连续失败次数（开机成功清零，
+# 以后做安全模式可以用）。bw_fail 最后进度% 轮数 最后的开机事件
+BW_STATE=/mnt/base-us/veradroid/state
+bw_fail() {
+    mkdir -p $BW_STATE 2>/dev/null
+    bf_n=$(cat $BW_STATE/boot-fail.count 2>/dev/null); case "$bf_n" in ''|*[!0-9]*) bf_n=0 ;; esac
+    bf_n=$((bf_n + 1)); echo $bf_n > $BW_STATE/boot-fail.count 2>/dev/null
+    [ "$(wc -l 2>/dev/null < $BW_STATE/boot-fail.log || echo 0)" -gt 200 ] && { tail -n 100 $BW_STATE/boot-fail.log > $BW_STATE/boot-fail.log.tmp 2>/dev/null && mv -f $BW_STATE/boot-fail.log.tmp $BW_STATE/boot-fail.log; }
+    echo "$(date '+%Y-%m-%d %H:%M:%S') boot stalled at $1% after $2 checks (about 2.5 s each), last event ${3:-none}, failures in a row $bf_n; version $(cat $VD/version 2>/dev/null) model $(cat $VD/model 2>/dev/null) kernel $(uname -r)" >> $BW_STATE/boot-fail.log 2>/dev/null
+    return 0
+}
+bw_ok() { rm -f $BW_STATE/boot-fail.count 2>/dev/null; return 0; }
 boot_watch() {
     rm -f $W/splash.dexopt
     last=0; n=0; lastev=; forced=
@@ -88,7 +101,7 @@ boot_watch() {
         case "$ev" in boot_progress*) ;; *) ev= ;; esac
         # 开机完成：马上放开显示桥（整屏刷出桌面）。以前先画一格“100% 启动完成”再放开：那一帧马上被桌面盖掉，
         # 在 PW5 模拟器上却要多等一次 fbink 画图（约 1–2 秒）
-        if [ "$done_flag" = 1 ]; then rm -f $W/boot.retry; bw_release; forced=done; break; fi
+        if [ "$done_flag" = 1 ]; then rm -f $W/boot.retry; bw_ok; bw_release; forced=done; break; fi
         boot_stage "$ev"
         # No boot_progress event yet: keep crawling, but never park at 27%
         # forever (the old clamp made a slow/quiet boot look frozen).
@@ -107,9 +120,12 @@ boot_watch() {
         fi
         # 卡在 early boot（27% 左右）时自动回 Kindle 并重试一次；第二次仍失败就停在 Kindle，不再循环
         if [ $n -ge "$stall" ] && [ $last -lt 60 ]; then
+            bw_fail "$last" "$n" "$ev"
             if [ -f $W/boot.retry ]; then
                 t "boot stalled again at ${last}%: return to kindle"
                 exec >>/tmp/veradroid-stop.log 2>&1; sh $VD/boot/stop.sh >/dev/null 2>&1
+                # 两次都没起来、已经回到 Kindle：在书库上写清楚发生了什么、记录在哪（vd_notice 在后台补画约 15 秒）
+                ( sleep 3; vd_notice "VeraDroid 没能启动：Android 开机两次都停在 ${last}% 左右，已回到 Kindle。再点一次可以重试；一直这样的话，请把 veradroid/state/boot-fail.log 发给我们" "VeraDroid did not start (boot stalled at ${last}% twice). Details: veradroid/state/boot-fail.log" ) </dev/null >>/tmp/veradroid-stop.log 2>&1 &
             else
                 touch $W/boot.retry
                 t "boot stalled at ${last}% after ${n}s: retry"

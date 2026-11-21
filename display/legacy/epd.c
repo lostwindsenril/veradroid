@@ -88,6 +88,7 @@
  *     (left/right) or height (up/down) >= steps,
  *     is ignored in night mode and when the waveform file does not support it.
  *     Hardware dithering is only on/off (Y4, or Y1 for DU on PW6): --dither 1/2/3 all mean "on".
+ *     It is only used for updates that hold a picture (text_no_dither): on text it puts dots along the glyph edges.
  *   --pwrdown <ms>: MXCFB_SET_PWRDOWN_DELAY (hwtcon and mxc_epdc). The driver default 0 powers the panel down after
  *     every update; a short delay saves the power-up sequence while updates come in bursts. The original value is read
  *     first and put back when we exit (the Kindle UI shares the panel). -1 = leave the driver alone (default).
@@ -397,31 +398,82 @@ static void on_sig(int s) { (void)s; quit = 1; }
    hardware dithering adds nothing there: the filtered areas are flat white, their diffs vanish and they stop counting
    towards the "large change" that picks REAGL / the KFB_FLASH page count. */
 static const int lightf_t[4] = { 256, 235, 220, 200 };
+/* Text edges (2026-11-20, community "画质 + 跟随 still a little jagged"; fb captures of a test page on a test device, docs/text-sharpness.md):
+   the anti-aliased edge of a glyph is a ramp of grays, and the panel keeps 16 of them. Two things in this curve cut that
+   ramp off:
+   - the light filter was a hard cut on every pixel: the light half of every glyph's edge (source >= threshold) became
+     white too, so strokes went from dark straight to white. Now a light pixel is only filtered when none of its four
+     neighbours is darker than the threshold - 24, i.e. flat light areas (page tints, separators, dim layers) still become
+     pure white, the edge pixels next to a stroke keep their gray (lightf_pass, after the conversion);
+   - 深色加深 multiplied the exponent on top of the contrast: 2.2 x 1.8 = 3.96 puts source 128 at 16 (black on the panel),
+     so the dark half of the ramp went black as well. The combined exponent is capped at 2.5, the contrast's own maximum.
+   On the test page, the share of white -> black edge steps with no gray between them: contrast 1.3 17 %, 1.3 + filter
+   medium 27 % -> 17 %, 2.2 + darken + filter strong (a real user setting) 76 % -> 30 %. */
+#define DARKEN_MAX_EXP 2.5
+#define LIGHTF_EDGE 24
+static int lf_on = 0;                 /* the light filter is applied by lightf_pass, not by the table */
+static uint8_t lf_ct = 255, lf_cd = 255;   /* curve value of the threshold / of threshold - LIGHTF_EDGE (not inverted) */
 
 static void build_lut(double gamma)
 {
     if (gamma < 1.0) gamma = 1.0;
     if (gamma > 2.5) gamma = 2.5;
     if (g_lightf < 0 || g_lightf > 3) g_lightf = 0;
-    /* 深色加深: one more power on top of the contrast curve (light grey text #999 -> about #4D at contrast 1.3), only
-       below the filter threshold, so with the filter on the jump to white stays at the same place */
-    double dk = g_darken ? 1.8 : 1.0;
-    if (!g_is_mtk && fbfd >= 0) {
-        /* i.MX EPDC (legacy). Oasis 3 user (contrast 2.2 + 浅色过滤 强 + 深色加深): 灰度最准 showed big black areas and
-           自动 blown-out whites. The two stack: exponent 2.2 x 1.8 = 3.96 puts mid grey 150 at 31 and 120 at 13 (black on
-           GC16, which shows every grey level), and the filter's hard cut at 200 jumps from ~97 straight to 255. Here the
-           combined exponent is capped at 2.5, and below the filter threshold the curve is stretched to end at white
-           (i / threshold), so the light colours fade into white instead of falling off a cliff. MediaTek: unchanged. */
-        double e = gamma * dk; if (e > 2.5) e = 2.5;
-        int t = lightf_t[g_lightf];
-        double span = t > 255 ? 255.0 : (double)t;
-        for (int i = 0; i < 256; i++)
-            lut[i] = i >= t ? 255 : (uint8_t)(pow(i / span, e) * 255.0 + 0.5);
-    } else
+    /* 深色加深: one more power on top of the contrast curve (light grey text #999 -> about #4D at contrast 1.3), capped (see
+       above) */
+    double e = gamma * (g_darken ? 1.8 : 1.0);
+    if (e > DARKEN_MAX_EXP) e = DARKEN_MAX_EXP;
     for (int i = 0; i < 256; i++)
-        lut[i] = i >= lightf_t[g_lightf] ? 255 : (uint8_t)(pow(i / 255.0, gamma * dk) * 255.0 + 0.5);
+        lut[i] = (uint8_t)(pow(i / 255.0, e) * 255.0 + 0.5);
+    int t = lightf_t[g_lightf];
+    lf_on = t <= 255;
+    if (lf_on) { lf_ct = lut[t]; lf_cd = lut[t - LIGHTF_EDGE]; }
     if (g_invert)
         for (int i = 0; i < 256; i++) lut[i] = (uint8_t)(255 - lut[i]);
+}
+
+/* the light filter on converted gray rows y0..y1 of img (w x h, stride): a pixel at least as light as the threshold
+   becomes white unless one of its four neighbours is darker than the threshold - LIGHTF_EDGE (it is part of an edge).
+   In place: a pixel it turns white was not dark before either, so the order does not change the result. Pure white
+   pixels are skipped, so a white page costs one compare per pixel. */
+static void lightf_pass(uint8_t *img, int stride, int w, int h, int y0, int y1)
+{
+    if (!lf_on || w <= 0) return;
+    const uint8_t m = g_invert ? 0xFF : 0;     /* v ^ m = the value before the inversion */
+    const uint8_t ct = lf_ct, cd = lf_cd, white = (uint8_t)(255 ^ m);
+#ifdef __ARM_NEON
+    const uint8x16_t vm = vdupq_n_u8(m), vct = vdupq_n_u8(ct), vcd = vdupq_n_u8(cd), vw = vdupq_n_u8(white), v255 = vdupq_n_u8(255);
+#endif
+    if (y0 < 0) y0 = 0;
+    if (y1 > h) y1 = h;
+    for (int y = y0; y < y1; y++) {
+        uint8_t *r = img + (size_t)y * stride;
+        const uint8_t *up = y > 0 ? r - stride : NULL, *dn = y + 1 < h ? r + stride : NULL;
+#define LF_PIX(x) do { uint8_t u_ = r[x] ^ m;                                                                      \
+            if (u_ >= ct && u_ != 255 &&                                                                           \
+                !(((x) > 0 && (uint8_t)(r[(x) - 1] ^ m) < cd) || ((x) + 1 < w && (uint8_t)(r[(x) + 1] ^ m) < cd) ||   \
+                  (up && (uint8_t)(up[x] ^ m) < cd) || (dn && (uint8_t)(dn[x] ^ m) < cd)))                        \
+                r[x] = white;                                                                                      \
+        } while (0)
+        int x = 0;
+        LF_PIX(0);
+        x = 1;
+#ifdef __ARM_NEON
+        /* 16 pixels at a time; the left neighbour may already be filtered, which (see above) does not change anything */
+        for (; x + 17 <= w; x += 16) {
+            uint8x16_t c = vld1q_u8(r + x), u = veorq_u8(c, vm);
+            uint8x16_t cand = vbicq_u8(vcgeq_u8(u, vct), vceqq_u8(u, v255));
+            uint64x2_t t = vreinterpretq_u64_u8(cand);
+            if (!(vgetq_lane_u64(t, 0) | vgetq_lane_u64(t, 1))) continue;     /* white, or darker than the threshold */
+            uint8x16_t dk = vorrq_u8(vcltq_u8(veorq_u8(vld1q_u8(r + x - 1), vm), vcd), vcltq_u8(veorq_u8(vld1q_u8(r + x + 1), vm), vcd));
+            if (up) dk = vorrq_u8(dk, vcltq_u8(veorq_u8(vld1q_u8(up + x), vm), vcd));
+            if (dn) dk = vorrq_u8(dk, vcltq_u8(veorq_u8(vld1q_u8(dn + x), vm), vcd));
+            vst1q_u8(r + x, vbslq_u8(vbicq_u8(cand, dk), vw, c));
+        }
+#endif
+        for (; x < w; x++) LF_PIX(x);
+#undef LF_PIX
+    }
 }
 
 static long now_ms(void)
@@ -610,7 +662,11 @@ static void set_wfm(FBInkConfig *c, int mode, WFM_MODE_INDEX_T auto_wfm)
     case M_DU:    c->wfm_mode = WFM_DU; break;
     case M_GC16:  c->wfm_mode = WFM_GC16; break;
     case M_REAGL: c->wfm_mode = WFM_REAGL; break;
-    case M_CLEAN: c->wfm_mode = WFM_GL16; break;      /* PARTIAL: only pixels whose gray level differs are driven */
+    /* FULL: every pixel of the area is driven. PARTIAL only drives pixels whose value changed, and after a DU refresh the
+       driver remembers the gray value it was given, so a GL16 PARTIAL of the same picture changed nothing: the edges DU
+       drew in black / white stayed that way (mxc_epdc and hwtcon alike). GL16 does not drive white -> white, so FULL does
+       not flash. */
+    case M_CLEAN: c->wfm_mode = WFM_GL16; c->is_flashing = true; break;
     case M_QPASS: c->wfm_mode = no_reagl ? WFM_GL16 : WFM_REAGL; c->is_flashing = true; break;   /* FULL: every pixel */
     default:      c->wfm_mode = auto_wfm; break;
     }
@@ -620,6 +676,21 @@ static void set_wfm(FBInkConfig *c, int mode, WFM_MODE_INDEX_T auto_wfm)
     if (c->wfm_mode == WFM_AUTO) c->dithering_mode = HWD_PASSTHROUGH;
 }
 static void push_region(int x0, int y0, int x1, int y1, int mode);
+static int img_box(const uint8_t *buf, int w, int h, int *bx0, int *by0, int *bx1, int *by1);
+/* No hardware dithering for text (KOReader's rule too: dithering is for pictures). On a glyph edge the MDP's Y4 dithering
+   scatters the edge grays into a dot pattern along the stroke, and Y1 (DU on PW6) turns the whole anti-aliased edge
+   into dots; a plain cut to 16 levels (or DU's own black / white) gives a clean edge. So an update keeps the dithering
+   only when it holds a picture (img_box: a block of 32x32 tiles that are mostly mid-gray). Colour panels keep their own
+   handling. */
+static unsigned long n_text_nodither = 0;
+static void text_no_dither(FBInkConfig *c, const uint8_t *buf, int w, int h)
+{
+    if (c->dithering_mode == HWD_PASSTHROUGH || g_color) return;
+    int a, b, d, e;
+    if (w >= 64 && h >= 64 && img_box(buf, w, h, &a, &b, &d, &e) > 0) return;
+    c->dithering_mode = HWD_PASSTHROUGH;
+    n_text_nodither++;
+}
 
 static int push(const uint8_t *rgba, int x, int y, int w, int h, int mode)
 {
@@ -634,6 +705,7 @@ static int push(const uint8_t *rgba, int x, int y, int w, int h, int mode)
         rgba_to_y8_rot(rgba, x, y, w, h, cur_y8);
         int px, py, pw, ph;
         rot_rect(x, y, w, h, &px, &py, &pw, &ph);
+        lightf_pass(cur_y8, W, W, H, py, py + ph);
         push_region(px, py, px + pw, py + ph, mode);
         return 0;
     }
@@ -646,6 +718,7 @@ static int push(const uint8_t *rgba, int x, int y, int w, int h, int mode)
     uint8_t *buf = malloc((size_t)w * h);
     if (!buf) return -1;
     rgba_to_y8(rgba, W * 4, x, y, w, h, buf);
+    lightf_pass(buf, w, w, h, 0, h);
 
     FBInkConfig c = cfg;
     c.dithering_mode = g_no_hwdither ? HWD_PASSTHROUGH : dither;
@@ -655,6 +728,7 @@ static int push(const uint8_t *rgba, int x, int y, int w, int h, int mode)
     int large = (long)w * h > (long)W * H * 4 / 10;
     int flash = mode == M_FULL;
     set_wfm(&c, mode, large ? WFM_REAGL : WFM_DU);
+    text_no_dither(&c, buf, w, h);
     int anim = maybe_animate(&c, w, h, flash);
     long t0 = now_ms();
     if (g_cfa || g_rawmtk) c.no_refresh = true;
@@ -895,6 +969,7 @@ static int push_y8(const uint8_t *buf, int x, int y, int w, int h, int mode)
     set_wfm(&c, mode, aw);
     /* A2 / scroll DU: no hardware dithering (FBInk then sends A2 with EPDC_FLAG_FORCE_MONOCHROME, the EPDC thresholds it) */
     if (c.wfm_mode == WFM_A2 || (g_scroll && c.wfm_mode == WFM_DU)) c.dithering_mode = HWD_PASSTHROUGH;
+    text_no_dither(&c, buf, w, h);
     int anim = (g_cleaning || g_scroll) ? 0 : maybe_animate(&c, w, h, flash);      /* the clean-up pass / a scroll is never animated */
     long t0 = now_ms();
     if (g_cfa || g_rawmtk) c.no_refresh = true;
@@ -1017,6 +1092,9 @@ static int show_page(const uint8_t *shm, int page, int mode, int force_full, int
         if (fy1 > H) fy1 = H;
         if (fy1 < fy0) fy1 = fy0;
     }
+    /* light filter: whether a light pixel stays gray depends on the rows above and below it, so the rows next to the
+       changed ones are converted (and compared) again */
+    if (lf_on && fy1 > fy0) { if (fy0 > 0) fy0--; if (fy1 < H) fy1++; }
     int r = show_page_rows(shm, page, mode, force_full, may_hold, may_pace, fy0, fy1);
     g_scroll = 0;
     need_full = 0;
@@ -1027,8 +1105,11 @@ static int show_page_rows(const uint8_t *shm, int page, int mode, int force_full
 {
     long tc0 = now_ms();
     last_page = page;
-    if (g_rot) rgba_to_y8_rot(page_at(shm, page, (size_t)LW * LH * 4), 0, 0, g_rot == 180 ? VW : LW, LH, cur_y8);
-    else if (fy1 > fy0) rgba_to_y8_opaque(page_at(shm, page, (size_t)W * H * 4), W * 4, 0, fy0, W, fy1 - fy0, cur_y8 + (size_t)fy0 * W);
+    if (g_rot) { rgba_to_y8_rot(page_at(shm, page, (size_t)LW * LH * 4), 0, 0, g_rot == 180 ? VW : LW, LH, cur_y8); lightf_pass(cur_y8, W, W, H, 0, H); }
+    else if (fy1 > fy0) {
+        rgba_to_y8_opaque(page_at(shm, page, (size_t)W * H * 4), W * 4, 0, fy0, W, fy1 - fy0, cur_y8 + (size_t)fy0 * W);
+        lightf_pass(cur_y8, W, W, H, fy0, fy1);
+    }
     if (!prev_valid || force_full) {
         if (mode == M_FULL) flip_count = 0;
         push_region(0, 0, W, H, mode);
@@ -1476,6 +1557,7 @@ static void verify_page(const uint8_t *shm)
     uint8_t *t = malloc((size_t)W * H);
     if (!t) return;
     rgba_to_y8_opaque(page_at(shm, last_page, (size_t)W * H * 4), W * 4, 0, 0, W, H, t);
+    lightf_pass(t, W, W, H, 0, H);
     long px = 0; int r0 = -1, r1 = -1, x0 = W, x1 = 0;
     for (int y = 0; y < H; y++) {
         const uint8_t *a = t + (size_t)y * W, *b = prev_y8 + (size_t)y * W;
@@ -1758,8 +1840,8 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
             else if (!strncmp(line, "MONO", 4)) { int v; if (sscanf(line + 4, "%d", &v) == 1 && v >= 0 && v <= 254) mono_level = v; }
             else if (!strncmp(line, "MAXDEFER", 8)) { int v; if (sscanf(line + 8, "%d", &v) == 1 && v >= 0 && v <= 10000) max_defer_ms = v; }
             else if (!strcmp(line, "STATS"))
-                fprintf(stderr, "[%ld] epd: stats sent=%lu flash=%lu qpass=%lu scroll_frames=%lu scroll_paced=%lu scroll_clean=%lu scroll_held=%lu gcn=%lu newwin=%lu\n",
-                        now_ms(), n_sent, n_flash, n_qpass, n_scroll_frames, n_scroll_paced, n_scroll_clean, n_scroll_held, n_gcn, n_newwin);
+                fprintf(stderr, "[%ld] epd: stats sent=%lu flash=%lu qpass=%lu scroll_frames=%lu scroll_paced=%lu scroll_clean=%lu scroll_held=%lu gcn=%lu newwin=%lu text_nodither=%lu\n",
+                        now_ms(), n_sent, n_flash, n_qpass, n_scroll_frames, n_scroll_paced, n_scroll_clean, n_scroll_held, n_gcn, n_newwin, n_text_nodither);
             else if (!strncmp(line, "NOFLIP", 6)) { int v; if (sscanf(line + 6, "%d", &v) == 1 && v >= 0 && v <= 5000) noflip_until = now_ms() + v; }
             else if (!strncmp(line, "HINT", 4)) {
                 int ms, pc;

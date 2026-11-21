@@ -3,15 +3,13 @@
 # changes only when both original byte runs are where 1.00's images have them; the image's own file is never touched.
 cd "$(dirname "$0")/.." || exit 2
 fail() { echo "FAIL: $*"; exit 1; }
-# host/legacy is the legacy line's own release (docs/legacy-line.md): it is checked only once it carries this change.
-HL=; grep -q '^ALARMFIX_LIB=' host/legacy/boot/lib/container.sh && HL=legacy
-for h in pw6 k49 $HL; do
+for h in pw6 k49 legacy; do
     c=host/$h/boot/lib/container.sh
     grep -q '^    alarmfix_prepare ' $c || fail "$c: container_start does not call alarmfix_prepare"
     grep -q '^        alarmfix_mount ' $c || fail "$c: run_in_ns does not call alarmfix_mount"
     sed -n '/^ALARMFIX_LIB=/,/^alarmfix_mount()/p' $c > /tmp/vd-af.$$.$h
 done
-cmp -s /tmp/vd-af.$$.pw6 /tmp/vd-af.$$.k49 && { [ -z "$HL" ] || cmp -s /tmp/vd-af.$$.pw6 /tmp/vd-af.$$.legacy; } || { rm -f /tmp/vd-af.$$.*; fail "alarmfix differs between hosts"; }
+cmp -s /tmp/vd-af.$$.pw6 /tmp/vd-af.$$.k49 && cmp -s /tmp/vd-af.$$.pw6 /tmp/vd-af.$$.legacy || { rm -f /tmp/vd-af.$$.*; fail "alarmfix differs between hosts"; }
 rm -f /tmp/vd-af.$$.*
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT

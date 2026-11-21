@@ -4,18 +4,20 @@ settings_defaults() {
     RETURN_MODE=freeze     # 返回 Kindle 时：freeze = 冻结留在内存（再打开几秒），off = 关掉
     ZRAM_MB=512            # 运行期间的压缩内存（MB），0 = 不开
     SLIM=1                 # 系统瘦身（lib/slim.sh）：1 = 停掉用不上的系统服务，0 = 原样
+    HIDE_SU=1              # 1 = 应用看不到 su（lib/slim.sh su_hide：/system/xbin/su 改名 vdsu；加固应用见到 su 就自杀），0 = 原样
     LOWMEM=auto            # 低内存模式：auto = 内存不到约 700 MB 的机型自动开，on / off = 强制开 / 关（见下面 lowmem 的说明）
     KINDLE_UI=auto         # Android 在前台时 Kindle 自己的界面怎么处置（lib/framework.sh）：keep 只暂停 | freeze 再把后台进程冻住 |
                            # stop 把 Java 框架和书库程序停掉腾内存（返回 Kindle 约一分钟）| auto = 低内存模式用 stop，否则 freeze
     SYSTEM_APP=home        # 启动后打开什么：home 或包名
     ANDROID_DNS="223.5.5.5 223.6.6.6"
     KFB_CONTRAST=1.3       # 显示：对比度曲线 gamma 1.0~2.5
-    KFB_DITHER=3           # 硬件抖动：0 关，1 Floyd-Steinberg，2 Atkinson，3 有序
+    KFB_DITHER=3           # 硬件抖动：0 关，1/2/3 开（硬件只有开 / 关）。只用在有图片的刷新上，文字不抖动（epd.c text_no_dither）
     KFB_FLASH=8            # 显示：每翻 N 页（大面积变化）整屏闪刷一次，0 = 不按页数（和 Kindle 的页面刷新一样，清残影）
     KFB_INVERT=0           # 显示：反色
     KFB_LIGHTF=0           # 显示：浅色过滤 0 关 1 弱 2 中 3 强：比阈值浅的颜色（浅灰 / 米色 / 浅绿底、半透明的灰色蒙层）直接变纯白，
-                           # 少了抖动噪点和大面积变化，闪刷少、字更清楚（epd.c build_lut：弱 235 / 中 220 / 强 200，按原始亮度）
-    KFB_DARKEN=0           # 显示：深色加深 1 = 没被滤成白的部分再压深一档（浅灰字变黑）
+                           # 少了抖动噪点和大面积变化，闪刷少（epd.c build_lut：弱 235 / 中 220 / 强 200，按原始亮度）。紧挨着深色笔画的浅色像素不滤，
+                           # 字边缘的灰阶留着（lightf_pass，docs/text-sharpness.md）
+    KFB_DARKEN=0           # 显示：深色加深 1 = 没被滤成白的部分再压深一档（浅灰字变黑）；和对比度合起来的指数最多 2.5，不把字边缘的灰阶压没
     KFB_SETTLE=40          # 显示：滑动 / 动画时合并中间帧，静止这么多毫秒后才刷（0 = 每帧都刷）
     KFB_MODE=0             # 显示：刷新方式 0 均衡 1 灰度最准 2 最快
     KFB_HOLD=70            # 显示：小于屏幕 3% 的首个变化（按钮高亮）暂缓这么多毫秒，和随后的整页变化合成一次刷新（0 = 不暂缓）
@@ -123,6 +125,18 @@ kindle_ui_mode() {
     esac
 }
 
+# PW4：硬件抖动默认改成关（models/old-base.conf，PxP 有序抖动把深灰纯色块画成竖条纹）。桌面的设置页一保存就把当时的
+# KFB_DITHER=3 也写进了 settings.conf，默认值改了老用户收不到：每台机器只做一次，删掉 settings.conf 里的 KFB_DITHER=3
+# （回到机型默认 0）。之后用户在 设置 → 显示 里再选“有序点阵”，就照用户的。
+dither_migrate() {
+    [ -f "$SYS/settings.conf" ] && [ ! -f "$SYS/.dither-default-0" ] || return 0
+    if grep -q '^KFB_DITHER=3$' "$SYS/settings.conf"; then
+        grep -v '^KFB_DITHER=3$' "$SYS/settings.conf" > "$SYS/settings.conf.dm" && mv -f "$SYS/settings.conf.dm" "$SYS/settings.conf" &&
+            { type t >/dev/null 2>&1 && t "settings: KFB_DITHER=3 dropped once (PW4 hardware dithering now off by default)"; }
+    fi
+    touch "$SYS/.dither-default-0" 2>/dev/null
+    return 0
+}
 settings_load() {
     settings_defaults
     # First-install default only.  It must be applied before settings.conf:
@@ -143,6 +157,7 @@ settings_load() {
         [ -f "$VD/models/old-base.conf" ] && . "$VD/models/old-base.conf"
         [ -f "$VD/models/$MODEL_SUB.conf" ] && . "$VD/models/$MODEL_SUB.conf"
     fi
+    [ "$MODEL_SUB" = pw4 ] && dither_migrate
     [ -f "$SYS/settings.conf" ] && . "$SYS/settings.conf"
     # 排障 / 测试用的覆盖：系统盘没挂上时也能改（settings.conf 在系统盘里）
     [ -f "$VD/slim" ] && SLIM=$(cat "$VD/slim" 2>/dev/null)
@@ -169,7 +184,7 @@ settings_load() {
 
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK PAGE_KEYS_MAP; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; echo "PAGE_KEYS_HW=$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)"; } > $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
     type ub_mirror >/dev/null 2>&1 && ub_mirror      # 安装器读的副本（backup.sh）
@@ -182,10 +197,11 @@ settings_apply() {
     sfile=$W/settings.apply.$$.$(cut -d' ' -f1 /proc/uptime | tr -d .)
     mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
     touch $SYS/settings.conf
-    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK; do
+    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP; do
         v=$(sed -n "s/^$k=\([0-9A-Za-z._,]*\)\$/\1/p" "$sfile" | tail -1)
         [ -n "$v" ] || continue
         case "$k=$v" in LOWMEM=auto|LOWMEM=on|LOWMEM=off|KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop|GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; LOWMEM=*|KINDLE_UI=*|GESTURE_HINT=*) continue ;; esac
+        case "$k=$v" in PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;; esac
         grep -v "^$k=" $SYS/settings.conf > "$sfile.conf" 2>/dev/null
         # KEY=default：删掉用户的设置，回到默认值（机型默认 / models/<id>.conf / settings_defaults）——桌面“恢复默认设置”用
         [ "$v" = default ] || echo "$k=$v" >> "$sfile.conf"
@@ -211,8 +227,11 @@ settings_apply() {
         fi
     fi
     rm -f "$sfile" "$sfile.conf"
+    pk_before=$PAGE_KEYS_MAP
     settings_load
     settings_publish
+    # 实体翻页键发成什么键（memory.sh）：改了就重写键位表，让 Android 重新打开这个设备（立即生效）
+    [ "$PAGE_KEYS_MAP" != "$pk_before" ] && type page_keys_apply >/dev/null 2>&1 && page_keys_apply
     # ANIM 必须先于 SET：显示桥收到 SET 会立刻重绘，若 ANIM 在后面，这次重绘仍用旧步数，
     # 下一条 P/D 又可能先碰到旧缓冲，导致“设置里选了 6 步，日志还是 12”。
     epd_send ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN

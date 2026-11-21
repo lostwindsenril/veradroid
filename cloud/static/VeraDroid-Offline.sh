@@ -82,8 +82,29 @@ case "$(uname -r)" in
     *) WANT=pw6; WANTZ=VeraDroid-Offline.zip; DEV="PaperWhite 6 / Colorsoft"; DEVEN="PaperWhite 6 / Colorsoft" ;;
 esac
 echo "device: $DEVEN, kernel $(uname -r), fb width ${fbw:-?}: needs veradroid-$WANT-*.tar.gz ($WANTZ)"
-B=
-for f in "$HERE"/veradroid-$WANT-*.tar.gz; do [ -f "$f" ] && B=$f && break; done
+# documents 里同一种离线包有好几个（旧版本没删、浏览器又下了一份）时，以前按文件名排序拿第一个，可能装回旧版本。
+# 现在按文件名里的版本号挑最新的（点分的每一段按数字比：0.8.13 > 0.8.9，1.10 > 1.9），日志里记下选了哪个。
+# 文件名里读不出版本号的（如 “veradroid-pw6-1.02 (1).tar.gz”）只在没有别的可选时才用。
+ver_newer() { # a b：a 比 b 新返回 0
+    awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, "."); k = (n > m) ? n : m
+        for (i = 1; i <= k; i++) { p = x[i] + 0; q = y[i] + 0; if (p > q) exit 0; if (p < q) exit 1 }
+        exit 1 }'
+}
+pick_bundle() { # 目录 变体：设 B（选中的文件）BV（它的版本，读不出时为空）NB（候选个数）
+    B=; BV=; NB=0; pb_all=; pb_odd=
+    for f in "$1"/veradroid-$2-*.tar.gz; do
+        [ -f "$f" ] || continue
+        NB=$((NB + 1)); pb_all="$pb_all $(basename "$f")"
+        v=$(basename "$f" .tar.gz); v=${v#veradroid-$2-}
+        case "$v" in ''|*[!0-9.]*|.*|*.|*..*) [ -n "$pb_odd" ] || pb_odd=$f; continue ;; esac
+        if [ -z "$BV" ] || ver_newer "$v" "$BV"; then B=$f; BV=$v; fi
+    done
+    [ -n "$B" ] || B=$pb_odd
+    [ "$NB" -gt 1 ] && echo "offline package: $NB bundles in $1:$pb_all; using the newest: $(basename "$B")"
+    return 0
+}
+pick_bundle "$HERE" "$WANT"
+[ -z "$B" ] || echo "offline package: $(basename "$B")"
 if [ -z "$B" ]; then
     other=; for f in "$HERE"/veradroid-pw6-*.tar.gz "$HERE"/veradroid-k49-*.tar.gz "$HERE"/veradroid-legacy-*.tar.gz; do [ -f "$f" ] && other=$(basename "$f") && break; done
     if [ -n "$other" ]; then
@@ -99,10 +120,10 @@ if [ -z "$B" ]; then
     fi
     fail "缺少安装包（veradroid-$WANT-…tar.gz）：请把 $WANTZ 里的文件全部放进 documents" "Missing veradroid-$WANT-*.tar.gz. Copy all files of $WANTZ into documents."
 fi
-VER=$(basename "$B" .tar.gz); VER=${VER##*-}
+VER=$BV; [ -n "$VER" ] || { VER=$(basename "$B" .tar.gz); VER=${VER##*-}; }
 case "$B" in *veradroid-k49-*) export VD_EXPERIMENTAL=1 ;; esac   # 实验机型离线包
 # 老机型（3.0 / 4.1 内核）离线包：veradroid-legacy-<版本>.tar.gz，只在模拟器上验证过，和联网安装一样先警告、再点一次确认
-case "$B" in *veradroid-legacy-*) export VD_EXPERIMENTAL=1; VER=$(basename "$B" .tar.gz); VER=${VER#veradroid-legacy-} ;; esac
+case "$B" in *veradroid-legacy-*) export VD_EXPERIMENTAL=1; [ -n "$BV" ] || { VER=$(basename "$B" .tar.gz); VER=${VER#veradroid-legacy-}; } ;; esac
 # ---- 只在模拟器上验证过的机型（3.0 内核 PW2 / PW3 / Voyage，4.1 内核 PW4 / 入门款 2019 / Oasis 2 / Oasis 3）----
 # 先在屏幕上把风险说清楚，要用户在 10 秒到 2 分钟之内再点一次本脚本才继续（Kindle 上没有键盘，这是最简单的“确认”）。
 # 真机验证过的实验机型（PW5 / KT5 / KT6 / Scribe，4.9 / 5.x 内核）不经过这里，流程和以前一样。

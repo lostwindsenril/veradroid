@@ -47,7 +47,21 @@ display_prepare() {
     m=$(cat $SYS/model 2>/dev/null | tr -d '\r\n')
     [ -n "$m" ] && echo "$m" > $X/model
     hwc_prepare
+    vdshim_prepare
     chmod -R 777 $X
+}
+# ashmem 垫片（android/device/veradroid/kindle/shim/vdshim.c，init 给每个进程 LD_PRELOAD）也随宿主程序发（bin/libvdshim.so，
+# 和 host/pw6、host/k49 同一个文件），开机前换掉镜像里的那份：镜像里的旧版对 ASHMEM_GET_PROT_MASK 一律回答 rwx，应用自带的
+# Chromium 内核（番茄小说的 libwebviewbytedance.so）把共享内存设成只读后检查不过，每次启动 SIGTRAP，应用随后进自己的“安全模式”。
+# 3.0 内核没有 memfd：区域是 /dev/vdshm 上已删除的文件（0600），掩码同样记在文件权限里。两种模式（命名空间 / chroot）都在
+# display_prepare 里、容器起来之前装。先写 .new 再 mv：镜像里的文件和回退用的旧镜像（rootfs.bak）可能是硬链接，不能原地改。
+vdshim_prepare() {
+    vs_dst=$R/system/lib/libvdshim.so
+    [ -f "$VD/bin/libvdshim.so" ] && [ -f "$vs_dst" ] || return 0
+    cmp -s "$VD/bin/libvdshim.so" "$vs_dst" && return 0
+    cp "$VD/bin/libvdshim.so" "$vs_dst.new" && chmod 644 "$vs_dst.new" && mv -f "$vs_dst.new" "$vs_dst" &&
+        t "ashmem: libvdshim.so installed" || { rm -f "$vs_dst.new"; t "ashmem: libvdshim.so not installed, image copy kept"; }
+    return 0
 }
 # 系统合成：hwcomposer.kindle.so（和 host/pw6、host/k49 同一个文件，android/hwcomposer）随宿主程序发（bin/），开机前装进系统的
 # /system/lib/hw；KFB_HWC=0 时写 $X/hwc.off，模块拒绝加载，SurfaceFlinger 回到原来的软件 GLES（libagl）。
@@ -205,7 +219,71 @@ sysfont_mount() {     # 容器里（run_in_ns），/dev 的 tmpfs 建好之后�
     echo "veradroid: system font $sf_src not mounted, stock fonts" >&2
     return 0
 }
+# AlarmManager 的定时器（docs/host-settings.md 第 5 节“时钟”）：Android 7.1 的 libandroid_servers.so 建 5 个 timerfd，其中两个用
+# CLOCK_REALTIME_ALARM / CLOCK_BOOTTIME_ALARM，要 CAP_WAKE_ALARM；7.1 的 zygote 不给 system_server 这个权限（8.0 才加），
+# timerfd_create 返回 EPERM，AlarmManager 退回“Falling back to a handler”：所有闹钟改用一个按 uptime 计时的 Handler 消息，
+# 非唤醒和唤醒闹钟共用一条消息、后排的把前面的顶掉，休眠的时间也不算。结果：TIME_TICK 晚几分钟到几小时才到
+# （测试机：TIME_TICK 过期 22 分钟还没发，下一条唤醒闹钟在 10 小时后），状态栏和应用里的时钟停着（1.00 用户反馈“时间还是不对”），
+# 应用的定时任务也一样。镜像修好之前（android/small-patches.py），开机前把这个库的副本改两处再绑上去：
+#   1. 时钟表 {REALTIME_ALARM, REALTIME, BOOTTIME_ALARM, BOOTTIME, MONOTONIC, REALTIME} 里的两个 *_ALARM 换成不要权限的
+#      REALTIME / BOOTTIME（休眠时不叫醒 Kindle：休眠归 Kindle 的 powerd；醒来后照样马上到期）；
+#   2. epoll 的 EPOLLWAKEUP 去掉（movt r5,#0x2000 换成 nop.w）：Android 冻结时到期的定时器不在内核里挂着唤醒源、挡住休眠。
+# 只在两处的原字节完全对上时才改（1.00 的 pw6 / 32 位镜像都在同一个偏移），对不上（已修好的镜像、别的版本）就什么都不做。
+# ALARM_FIX=0 关掉。
+ALARMFIX_LIB=system/lib/libandroid_servers.so
+ALARMFIX_TAB=154856; ALARMFIX_TAB_OLD=080000000000000009000000070000000100000000000000; ALARMFIX_TAB_NEW=000000000000000007000000070000000100000000000000
+ALARMFIX_EPW=52736;  ALARMFIX_EPW_OLD=c2f20005; ALARMFIX_EPW_NEW=aff30080
+alarmfix_hex() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; }
+alarmfix_put() { printf "$(printf '%s' "$3" | sed 's/../\\x&/g')" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+alarmfix_prepare() {   # 宿主侧，container_start 里、启动容器之前：$W/alarmfix/lib.so = 改好的副本（不改镜像里的文件：它和回退用的旧镜像是硬链接）
+    rm -rf $W/alarmfix
+    [ "${ALARM_FIX:-1}" = 0 ] && return 0
+    af_src=$R/$ALARMFIX_LIB; [ -f "$af_src" ] || return 0
+    [ "$(alarmfix_hex "$af_src" $ALARMFIX_TAB 24)" = $ALARMFIX_TAB_OLD ] && [ "$(alarmfix_hex "$af_src" $ALARMFIX_EPW 4)" = $ALARMFIX_EPW_OLD ] || return 0
+    mkdir -p $W/alarmfix && cp "$af_src" $W/alarmfix/lib.so || { rm -rf $W/alarmfix; return 0; }
+    alarmfix_put $W/alarmfix/lib.so $ALARMFIX_TAB $ALARMFIX_TAB_NEW; alarmfix_put $W/alarmfix/lib.so $ALARMFIX_EPW $ALARMFIX_EPW_NEW
+    if [ "$(alarmfix_hex $W/alarmfix/lib.so $ALARMFIX_TAB 24)" = $ALARMFIX_TAB_NEW ] && [ "$(alarmfix_hex $W/alarmfix/lib.so $ALARMFIX_EPW 4)" = $ALARMFIX_EPW_NEW ] &&
+       [ "$(wc -c < $W/alarmfix/lib.so)" = "$(wc -c < "$af_src")" ]; then
+        chmod 644 $W/alarmfix/lib.so; t "alarmfix: AlarmManager timerfd clocks without CAP_WAKE_ALARM"
+    else
+        rm -rf $W/alarmfix; t "alarmfix: patching the copy failed, AlarmManager left as is"
+    fi
+    return 0
+}
+alarmfix_mount() {     # 容器里（run_in_ns），/dev 的 tmpfs 建好之后、换根之前。副本放进 /dev（不和别的绑定共用文件）
+    [ -s $W/alarmfix/lib.so ] || return 0
+    mkdir -p $R/dev/vdlib && cp $W/alarmfix/lib.so $R/dev/vdlib/libandroid_servers.so && chmod 644 $R/dev/vdlib/libandroid_servers.so &&
+        mount --bind $R/dev/vdlib/libandroid_servers.so $R/$ALARMFIX_LIB && mount -o remount,ro,bind $R/$ALARMFIX_LIB 2>/dev/null
+    [ "$(alarmfix_hex $R/$ALARMFIX_LIB $ALARMFIX_TAB 24)" = $ALARMFIX_TAB_NEW ] && return 0
+    umount $R/$ALARMFIX_LIB 2>/dev/null; rm -f $R/dev/vdlib/libandroid_servers.so
+    echo "veradroid: AlarmManager fix not mounted" >&2
+    return 0
+}
+# 待机耗电（fix/standby-drain，2026-11-20 PW6 用户“关 Wi-Fi/蓝牙停在微信读书，夜里 10 小时掉 30 %”）：Android 的 healthd 把电池 uevent
+# 的 netlink 和周期 timerfd（CLOCK_BOOTTIME_ALARM）用 EPOLLWAKEUP 挂在 epoll 上。Android 冻结（屏保、返回 Kindle）后下一条
+# 电池 uevent / 定时器到期就把内核唤醒源（[timerfd] / NETLINK / eventpoll）激活，只有 healthd 下一次 epoll_wait 才放开，
+# 冻着就一直挂着：powerd 每次进休眠都在 1 ms 内被打回（"System out of suspend"、"Repeated_unknown_wakeup"），整夜不休眠
+# （用户诊断：uptime 和墙上时间一样走，电流 41-56 mA）。测试机实测冻结 1 秒后 [timerfd] 唤醒源就一直 active 到解冻。
+# 修法：bin/vdnocap（tools/vdnocap）绑到 /sbin/healthd 上，去掉 CAP_BLOCK_SUSPEND / CAP_WAKE_ALARM 再 exec 原来的 healthd
+# （原文件绑到 /dev/vdlib/healthd.real）：内核对没有 CAP_BLOCK_SUSPEND 的进程悄悄去掉 EPOLLWAKEUP，ALARM 定时器建不起来，
+# healthd 只靠 uevent 更新电量。不能对整个容器去掉：zygote 给 system_server capset CAP_BLOCK_SUSPEND，失败就中止。
+# 休眠归 Kindle 的 powerd（同 alarmfix）。NOCAP_FIX=0 关掉；文件不全就什么都不做（照旧启动）。
+nocap_mount() {        # 容器里（run_in_ns），/dev 的 tmpfs 建好之后、换根之前
+    [ "${NOCAP_FIX:-1}" = 0 ] && return 0
+    [ -f $VD/bin/vdnocap ] && [ -f $R/sbin/healthd ] && [ ! -L $R/sbin/healthd ] || return 0
+    mkdir -p $R/dev/vdlib && cp $VD/bin/vdnocap $R/dev/vdlib/vdnocap && chmod 755 $R/dev/vdlib/vdnocap &&
+        : > $R/dev/vdlib/healthd.real && mount --bind $R/sbin/healthd $R/dev/vdlib/healthd.real || {
+        umount $R/dev/vdlib/healthd.real 2>/dev/null; rm -f $R/dev/vdlib/vdnocap $R/dev/vdlib/healthd.real; return 0; }
+    # 先确认包装能跑起来（静态 ARM 程序；跑不起来时 healthd 是 critical 服务，起不来 init 会重启容器）
+    if $R/dev/vdlib/vdnocap /bin/sh -c 'exit 0' 2>/dev/null; then
+        mount --bind $R/dev/vdlib/vdnocap $R/sbin/healthd && return 0
+    fi
+    umount $R/dev/vdlib/healthd.real 2>/dev/null; rm -f $R/dev/vdlib/vdnocap $R/dev/vdlib/healthd.real
+    echo "veradroid: healthd capability wrapper not mounted" >&2
+    return 0
+}
 container_start() {
+    alarmfix_prepare      # AlarmManager 的 timerfd（run_in_ns 绑进去）
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
     fstrim_defuse
     docs_snapshot         # 开机完成后 after_boot 拿它核对 Kindle 书库（docs_verify）
@@ -403,6 +481,8 @@ run_in_ns() {
         [ -d $VD/fonts ] && mount --bind $VD/fonts $R/data/media/0/Fonts
         chmod 777 $R/data/media/0/Fonts 2>/dev/null
         sysfont_mount        # 系统字体（SYSTEM_FONT）：上面 sysfont_prepare 准备好的才绑
+        alarmfix_mount       # AlarmManager 的 timerfd（alarmfix_prepare 改好的副本）
+        nocap_mount          # healthd 不带 CAP_BLOCK_SUSPEND / CAP_WAKE_ALARM（冻结时不挂唤醒源，待机能休眠；4.1 内核，3.0 内核没有 EPOLLWAKEUP）
         # /sdcard -> /storage/self/primary -> /storage/emulated/0. vold/FUSE
         # replaces /storage/emulated and filters by sdcard_rw group; KOReader
         # then gets EACCES on books. Drop that FUSE view and bind the ext4

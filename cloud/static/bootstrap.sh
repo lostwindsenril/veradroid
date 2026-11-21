@@ -204,7 +204,7 @@ Kindle 休眠时，VeraDroid 显示这里的图片。在 Android 的 设置 → 
 # 包里自带的文件名记在 state/bundled.<文件夹>（整包安装时写）：带过去时跳过旧包自带的（新包有自己的那份；新包去掉的也不复活）。
 # 目标里已有同名文件的不动（包里有的以包为准）。这一段在 bootstrap*.sh 和各机型 boot/lib/tidy.sh 里是同一份
 # （tests/user-files-test.sh 核对）。set -eu 下不能失败。
-VD_USER_DIRS="fonts screensaver apps kindle-crash"
+VD_USER_DIRS="fonts screensaver apps kindle-crash webview-alt"   # webview-alt：用户打开“新网页内核”时下载的包（container.sh webview_dl），升级时带过去不用重下
 # vd_user_carry 从 到 "文件夹…" [mv]：$1/<d>/ 下（含子文件夹）用户的文件拷进 $2/<d>/；mv=mv 时挪过去（同一个盘，卸载留下的那份）。
 # 同一个文件系统上先试硬链接（不多占地方，host.bak 里的那份照样能回退），不行再拷。输出带过去的文件数。
 vd_user_carry() {
@@ -314,6 +314,8 @@ vd_root_tidy
 # 安装 / 更新期间不让 Kindle 睡、Wi-Fi 不省电（2026-11-14 真机：桌面里点的更新解压到一半设备失联，原因没查明，先把能想到的都堵上）。
 # 记下原值，所有退出路径（vd_cleanup，包括 die）都恢复；值读不到就不动。
 VD_PSS0=$(lipc-get-prop com.lab126.powerd preventScreenSaver 2>/dev/null || true)
+# 被硬杀（SIGKILL）时 EXIT 陷阱不跑，1 会一直留着、电源键进不了屏保（社区报告）：改之前把原值记在 state/keepawake.orig，下次启动时 veradroid.sh 放回
+[ "$VD_PSS0" = 0 ] && { mkdir -p /mnt/base-us/veradroid/state && echo 0 > /mnt/base-us/veradroid/state/keepawake.orig; } 2>/dev/null || true
 case "$VD_PSS0" in 0) lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 2>/dev/null || true ;; *) VD_PSS0= ;; esac
 VD_WPS0=
 vd_wifi_awake() { # Wi-Fi 省电关掉（stop.sh 的 wifi_ps_restore 会把它打开，停完 Android 再调一次）
@@ -339,7 +341,7 @@ vd_ssh_back() {
     return 0
 }
 vd_awake_restore() {
-    [ "$VD_PSS0" = 0 ] && lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null
+    [ "$VD_PSS0" = 0 ] && lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null && rm -f /mnt/base-us/veradroid/state/keepawake.orig
     [ "$VD_WPS0" = on ] && iwconfig wlan0 power on 2>/dev/null
     VD_PSS0=; VD_WPS0=; return 0
 }
@@ -707,8 +709,10 @@ vp_watch() {
 VP_TICK=
 vp_ticker_start() {
     vp_ticker_stop
+    # $$ 在子 shell 里仍是起它的那个脚本的 pid：脚本被硬杀（超时、SSH 断开）时 vp_ticker_stop 跑不到，
+    # 以前这个子 shell 就成了孤儿，每 5 秒 fork 一次直到 Kindle 重启（社区报告：PW4 模拟器一轮回归攒了 24 个）。父进程没了就退
     ( exp=${1:-60}; [ "$exp" -gt 0 ] 2>/dev/null || exp=60
-      while :; do
+      while [ -d /proc/$$ ]; do
           e=$(( $(vp_now) - VP_ST0 )); p=$((e * 100 / exp)); [ $p -gt 95 ] && p=95
           l2=$2; [ -n "${3:-}" ] && [ $e -gt $((exp * 2)) ] && l2=$3
           vp_progress $p "已用 $(vp_mmss $e) · 一般要 $(vp_mmss $exp) 左右" "$l2"
@@ -2148,6 +2152,8 @@ if [ "${VD_FACTORY:-0}" != "1" ]; then
                 vp_status "state=done" "result=latest" "ver=$cur_ver" "label=已是最新版本 $cur_ver"
                 show "已安装 VeraDroid $cur_ver，完整性检查通过，无需重装"
                 show "直接启动…"
+                # 离线包和已装的是同一版：留在 documents 里没用（约 140 MB），和装完一样清掉（只在离线安装时，只删我们的固定文件名）
+                remove_offline_package
                 remove_installer_later
                 [ "${VD_NO_START:-0}" = 1 ] || vd_start_android
                 exit 0

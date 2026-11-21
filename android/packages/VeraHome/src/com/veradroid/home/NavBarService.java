@@ -23,8 +23,14 @@ import java.lang.reflect.Method;
 
 /**
  * 传统“三大金刚键”导航栏：屏幕底部 返回 / 主页 / 多任务。
- * 用 overscan 把底部这一条从应用的显示区域里让出来，所以不会挡住应用自己的底栏（比如微信读书的工具栏）。
  * 设置 → 桌面 → 导航方式 里打开；prefs "navmode"：0 手势，1 三大金刚键，2 两者都要。
+ *
+ * 让位：窗口类型是 TYPE_NAVIGATION_BAR（要 STATUS_BAR_SERVICE，平台签名有），系统把它当成真的导航栏：
+ * 放在底部、高度用系统的 navigation_bar_height（48dp，按各机型的显示密度换算），应用的显示区域和 inset 都按它算。
+ * 以前用 overscan 让出底部：“沉浸式状态栏”的应用（微信读书书架：LAYOUT_FULLSCREEN + 自己画系统栏背景）
+ * 会把这一截让两次（DecorView 按导航栏 inset 留一次，View 再按 overscan 留一次），按键条上面多出一截空白；
+ * overscan 还会写进 display_settings.xml，桌面进程没走 onDestroy 就死了的话，底下一直空着一条。
+ * 现在启动时把以前留下的 overscan 清掉；加不上 TYPE_NAVIGATION_BAR（老镜像）才退回 overscan 的老办法。
  */
 public class NavBarService extends Service {
     private static final String TAG = "VeraNavBar";
@@ -36,7 +42,24 @@ public class NavBarService extends Service {
 
     static void apply(Context c) {
         Intent i = new Intent(c, NavBarService.class);
-        if (mode(c) == 0) c.stopService(i); else c.startService(i);
+        if (mode(c) == 0) { c.stopService(i); clearStaleOverscan(c); } else c.startService(i);
+    }
+
+    private boolean overscanUsed;   // 退回了 overscan 的老办法（关掉时要还原）
+    private int builtDpi;
+    private int retries;
+    private boolean destroyed;
+
+    /** 显示密度变了（appprof.sh 的每应用密度）：按新密度重搭，三个图标跟着系统给的那一格缩放。 */
+    @Override public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        if (bar instanceof android.widget.FrameLayout && c.densityDpi != builtDpi && !overscanUsed) {
+            // 窗口不撤（系统里只能有一个导航栏窗口），只把里面的按键按新密度重搭
+            builtDpi = c.densityDpi;
+            android.widget.FrameLayout f = (android.widget.FrameLayout) bar;
+            f.removeAllViews();
+            f.addView(build(LinearLayout.LayoutParams.MATCH_PARENT));
+        }
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -48,9 +71,42 @@ public class NavBarService extends Service {
     }
 
     private void show() {
-        if (bar != null) return;
+        if (bar != null || destroyed) return;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        int h = Ui.dp(this, HEIGHT_DP);
+        builtDpi = getResources().getConfiguration().densityDpi;
+        clearStaleOverscan(this);   // 老版本（overscan）留下的底边
+        android.widget.FrameLayout sys = new android.widget.FrameLayout(this);
+        sys.setBackgroundColor(Color.WHITE);
+        sys.addView(build(LinearLayout.LayoutParams.MATCH_PARENT));
+        // 高度 MATCH_PARENT：系统给导航栏的那一格（navigation_bar_height，换显示密度时跟着变）整格填满
+        WindowManager.LayoutParams sl = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_NAVIGATION_BAR,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_TOUCHABLE_WHEN_WAKING
+                | WindowManager.LayoutParams.FLAG_SPLIT_TOUCH,
+            PixelFormat.OPAQUE);
+        sl.gravity = Gravity.BOTTOM | Gravity.LEFT;   // 位置和大小系统自己定（PhoneWindowManager.layoutNavigationBar）
+        sl.windowAnimations = 0;
+        sl.setTitle("VeraNavBar");
+        try {
+            wm.addView(sys, sl);
+            bar = sys;
+            return;
+        } catch (Throwable t) {
+            // 另一个导航栏窗口还在（上一个服务实例刚撤、还没撤完）：过一会儿再试，不退回 overscan
+            if (String.valueOf(t.getMessage()).contains("already exists") && retries++ < 3) {
+                Log.w(TAG, "nav bar window still there, retrying: " + t);
+                new android.os.Handler().postDelayed(new Runnable() { @Override public void run() { show(); } }, 700);
+                return;
+            }
+            Log.w(TAG, "TYPE_NAVIGATION_BAR not allowed, falling back to overscan: " + t);
+        }
+        showOverscan();
+    }
+
+    /** 一条 高 h 的白条，三个键平分。 */
+    private View build(int h) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setBackgroundColor(Color.WHITE);
@@ -64,7 +120,13 @@ public class NavBarService extends Service {
         row.addView(button(Icons.Kind.SWITCH, new Runnable() { @Override public void run() { recents(); } }),
             new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
         wrap.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h));
+        return wrap;
+    }
 
+    /** 老办法：TYPE_PHONE + overscan 让出底部（加不上 TYPE_NAVIGATION_BAR 的老镜像）。 */
+    private void showOverscan() {
+        int h = Ui.dp(this, HEIGHT_DP);
+        View wrap = build(h);
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, h,
             WindowManager.LayoutParams.TYPE_PHONE,
@@ -81,11 +143,13 @@ public class NavBarService extends Service {
         lp.y = real.heightPixels - h;
         try {
             setOverscanBottom(h);
+            overscanUsed = true;
             wm.addView(wrap, lp);
             bar = wrap;
         } catch (Throwable t) {
             Log.w(TAG, "cannot add nav bar: " + t);
             setOverscanBottom(0);
+            overscanUsed = false;
         }
     }
 
@@ -124,6 +188,27 @@ public class NavBarService extends Service {
         startActivity(i);
     }
 
+    /**
+     * 以前的版本用 overscan 让底边，值存在 /data/system/display_settings.xml 里，重启也还在。
+     * 现在不用它了：底边还有 overscan 就清掉（只在不是 0 的时候设，设一次所有窗口要重新排一遍）。
+     */
+    static void clearStaleOverscan(Context c) {
+        try {
+            android.view.Display d = ((WindowManager) c.getSystemService(WINDOW_SERVICE)).getDefaultDisplay();
+            Class<?> dic = Class.forName("android.view.DisplayInfo");
+            Object info = dic.newInstance();
+            android.view.Display.class.getMethod("getDisplayInfo", dic).invoke(d, info);
+            int l = dic.getField("overscanLeft").getInt(info), t = dic.getField("overscanTop").getInt(info);
+            int r = dic.getField("overscanRight").getInt(info), b = dic.getField("overscanBottom").getInt(info);
+            if (b == 0) return;
+            Log.i(TAG, "clearing stale overscan " + l + "," + t + "," + r + "," + b);
+            Class<?> g = Class.forName("android.view.WindowManagerGlobal");
+            Object wms = g.getMethod("getWindowManagerService").invoke(null);
+            wms.getClass().getMethod("setOverscan", int.class, int.class, int.class, int.class, int.class)
+                .invoke(wms, 0, l, t, r, 0);
+        } catch (Throwable t) { Log.w(TAG, "overscan check failed: " + t); }
+    }
+
     /** IWindowManager.setOverscan(display 0, 0, 0, 0, bottom): apps lay out above the bar instead of under it. */
     private void setOverscanBottom(int px) {
         try {
@@ -135,11 +220,12 @@ public class NavBarService extends Service {
     }
 
     @Override public void onDestroy() {
+        destroyed = true;
         if (bar != null) {
-            try { wm.removeView(bar); } catch (Throwable ignored) { }
+            try { wm.removeViewImmediate(bar); } catch (Throwable ignored) { }
             bar = null;
         }
-        setOverscanBottom(0);
+        if (overscanUsed) { setOverscanBottom(0); overscanUsed = false; }
         super.onDestroy();
     }
 }

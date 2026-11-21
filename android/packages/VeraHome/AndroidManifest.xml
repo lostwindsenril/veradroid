@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.veradroid.home"
-    android:versionCode="89"
-    android:versionName="0.35.3">
+    android:versionCode="91"
+    android:versionName="0.36.0">
     <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="25" />
     <uses-permission android:name="android.permission.MANAGE_ACTIVITY_STACKS" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -26,6 +26,9 @@
     <uses-permission android:name="android.permission.REMOVE_TASKS" />
     <uses-permission android:name="android.permission.INJECT_EVENTS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 状态栏的占位窗口（TYPE_STATUS_BAR）和三大金刚键（TYPE_NAVIGATION_BAR）：系统按真的系统栏给应用让位（WindowManager 要 INTERNAL_SYSTEM_WINDOW，策略要 STATUS_BAR_SERVICE；平台签名才给） -->
+    <uses-permission android:name="android.permission.STATUS_BAR_SERVICE" />
+    <uses-permission android:name="android.permission.INTERNAL_SYSTEM_WINDOW" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <!-- gid media_rw: /data/media/0 is 0770 media_rw until after_boot opens it up, but VeraHome starts first and
@@ -147,6 +150,27 @@
                 <action android:name="android.settings.WIRELESS_SETTINGS" />
                 <action android:name="android.net.wifi.PICK_WIFI_NETWORK" />
                 <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- 安装程序“禁止安装来源不明的应用”对话框的“设置”按钮（SECURITY_SETTINGS），以及 Android 8 应用发的
+             MANAGE_UNKNOWN_APP_SOURCES：系统里没有“设置”应用，没人接就是点了没反应 / ActivityNotFoundException 闪退。
+             打开“未知来源”、提示一句就关掉（UnknownSourcesActivity）。 -->
+        <activity
+            android:name=".UnknownSourcesActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            <intent-filter>
+                <action android:name="android.settings.SECURITY_SETTINGS" />
+                <action android:name="android.settings.MANAGE_UNKNOWN_APP_SOURCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.settings.MANAGE_UNKNOWN_APP_SOURCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="package" />
             </intent-filter>
         </activity>
         <activity

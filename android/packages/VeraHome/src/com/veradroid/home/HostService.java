@@ -47,7 +47,12 @@ public class HostService extends Service {
         // 宿主在桌面起来之前就写好的提示（开机时 apps 文件夹里的 APK 装不上）
         handler.post(new Runnable() { @Override public void run() {
             String[] l = new File(HostLink.CTL).list();
-            if (l != null) for (String n : l) if (n.startsWith("notice.")) handle(n);
+            if (l != null) for (String n : l) {
+                if (n.startsWith("notice.")) handle(n);
+                // 桌面还没开始听时宿主留下的手势（开机时下划、桌面进程被杀重启的那几秒）：已经过时，删掉、不执行。
+                // 以前留着不管：老的宿主脚本用 touch 发手势，文件一直在就再也收不到事件，之后每次下划都“没有响应”
+                else if (n.startsWith("act.")) { new File(HostLink.CTL + n).delete(); android.util.Log.i("VeraHome", "ctl: dropped stale " + n); }
+            }
         } });
         // 锁屏密码（LockScreen）：USB 上放了重置文件就先清掉，再按需盖上锁屏（开机这一次）
         handler.post(new Runnable() { @Override public void run() { handle("lock.reset"); LockScreen.show(HostService.this); } });

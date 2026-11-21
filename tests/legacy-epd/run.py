@@ -208,6 +208,18 @@ def main():
     r, txt = b.refreshes(m)
     check(r and b.p.poll() is None and 'epd: stats sent=' in txt, 'unknown / malformed lines are ignored, frames still drawn, STATS logs')
     b.close()
+    print('== no hardware dithering on text (docs/text-sharpness.md)')
+    b = Bridge(binary)
+    m = b.mark(); b.page(); time.sleep(1.0)
+    r, _ = b.refreshes(m)
+    check(r and all(x['dither'] == 0 for x in r), f'a text page goes out without hardware dithering ({[x["dither"] for x in r]})')
+    with open(b.shm, 'r+b') as f:      # a 320x320 mid-gray block: a picture
+        for y in range(400, 720):
+            f.seek(y * W * 4 + 400 * 4); f.write(bytes([128, 128, 128, 255]) * 320)
+    m = b.mark(); b.send('P 0 400 720'); time.sleep(1.0)
+    r, _ = b.refreshes(m)
+    check(r and all(x['dither'] != 0 for x in r), f'a picture keeps the hardware dithering ({[x["dither"] for x in r]})')
+    b.close()
     b = Bridge(binary, env={'STUB_PLATFORM': 'Zelda'})
     m = b.mark(); drag(b, 4, 0.1); time.sleep(1.4)
     r, txt = b.refreshes(m)

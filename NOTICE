@@ -34,6 +34,10 @@ licences, versions and the place to get the corresponding source:
       SIL OFL 1.1        https://github.com/lxgw/LxgwWenKai
   pinyin-data, phrase-pinyin-data, jieba (data extracted into VeraIME's pinyin.tsv)
       MIT                see android/packages/VeraIME/assets/NOTICE-pinyin.txt
+  Chromium WebView 119.0.6045.194 (optional web engine, downloaded on demand, not in the packages;
+  com.embrith.webview, built from source without Google Play services by community user momo)
+      BSD-3-Clause and the third-party licences listed in its webview_licenses.notice
+      https://chromium.googlesource.com/chromium/src/+/refs/tags/119.0.6045.194
   Mozilla CA certificate bundle (added to the Android image)
       MPL-2.0            https://curl.se/docs/caextract.html
 

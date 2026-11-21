@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the optional engine is listed: the stored provider choice (Settings.Global webview_provider = com.android.webview)
+     is then not a valid provider and WebViewUpdateService falls back to the first valid one in this list. The signature
+     element keeps the check when ro.debuggable is 0 (7.1.1 skips it on debuggable builds). Certificate: CN=Embrith WebView,
+     SHA-256 2C:A8:61:E5:B8:29:F5:AB:A0:BE:12:B7:AB:FA:E4:F3:8F:99:AC:47:B1:20:4E:47:CA:6D:85:5F:63:8C:E5:8E. -->
+<webviewproviders>
+    <webviewprovider description="Chromium 119 WebView" packageName="com.embrith.webview" availableByDefault="true">
+        <signature>MIIC2jCCAcKgAwIBAgIJAPFcj580mz+lMA0GCSqGSIb3DQEBCwUAMBoxGDAWBgNVBAMTD0VtYnJpdGggV2ViVmlldzAgFw0yNjExMjAwNTEyNThaGA8yMDU0MDQwNzA1MTI1OFowGjEYMBYGA1UEAxMPRW1icml0aCBXZWJWaWV3MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5tHWMEw1kfjnTjn1Iy87ksOSu8BoLFGEjVt2S4E08ybPHwaMdVm3piNZ9uGgw6SQ6Ly5CwBzZf5lMixqXq2UQIztV9YbwfzEZ6kKswoqA54WIQR2Cw7r7v6A8pb+/76iGUEvZ30qE5kMDanMMPY7aeRzaUhrpB5E2JYBoG0OPFBEStfXZSxydCjdrRfzppe2P42VTkWl5dg90JC6ijGtfN4UAZ40Tx4TMEmoKI2e0uom4tW+71K6PL+igFSg7CVYGZwgSnhG78jIhPh9vZINDSJpNwfRkNQXYCAMW2xOJHggST8TC3N4jXuRjkS9SspnW3xPf5icV1fVa9i9TYTuUQIDAQABoyEwHzAdBgNVHQ4EFgQUFCGFPizwYz+JxLUC3Zbr0whPqR0wDQYJKoZIhvcNAQELBQADggEBABf8qsKJDpU8LRiGSUm4uursG9c1HR89cbFMwooU+Th3BdoENEjOlq1feiTxj0LyBOSGZRmiq7O4xC90udhUnZTQp7MEjMia0Fa6kWe+hEpUxUBErfqs1VSOV9W3FfidsCkeDEWqA0w52GVifQPXQ9LCumfaRjB+4J8I3N5EjCpIME/hMcc5sKbbvvBOB8tt5sZ37FGw4M2BJReVEt1zwvK4oXInPIvEKzErYGfLhKDxzVmNdfKHFWHHWcA/wrnNPb2NsmveJSH3d0hMI7bV1aD6GSNZPEkcU/p6OR1ZXdkawTDpWwqzXtpYRfShTFxv303kJLgvl5gky3mUy/I0R7s=</signature>
+    </webviewprovider>
+</webviewproviders>

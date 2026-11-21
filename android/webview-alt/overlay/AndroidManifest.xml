@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- VeraDroid: static resource overlay for framework-res (Android 7.1 /vendor/overlay, applied by the idmap scan that zygote runs).
+     Only bound into /system/vendor/overlay while the optional WebView 119 is in use (host/*/boot/lib/container.sh webview_mount):
+     replaces config_webview_packages so that WebViewUpdateService accepts com.embrith.webview, signature pinned. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.veradroid.overlay.webviewalt" android:versionCode="1" android:versionName="1">
+    <overlay android:targetPackage="android" android:priority="1" />
+    <application android:hasCode="false" />
+</manifest>

@@ -1,3 +1,4 @@
+#include <stdio.h>
 /* FBInk stand-in for the native veradroid-epd test (tests/epd-test.sh): no panel, every refresh is logged by epd.c
    itself; fbink_wait_for_complete sleeps like a PW6 panel (DU 135 ms, the rest 205 ms) so PACE / busy logic runs. */
 #include <fcntl.h>
@@ -19,6 +20,7 @@ int fbink_print_raw_data(int fd, const unsigned char *restrict d, const int w, c
 {
     (void)fd; (void)d; (void)w; (void)h; (void)len; (void)x; (void)y;
     last_marker++; last_slow = c->wfm_mode != WFM_DU && c->wfm_mode != WFM_A2;
+    fprintf(stderr, "stub: wfm=%d dither=%d full=%d\n", (int)c->wfm_mode, (int)c->dithering_mode, (int)c->is_flashing);   /* text dithering / CLEAN checks */
     return 0;
 }
 int fbink_wait_for_complete(int fd, uint32_t m) { (void)fd; (void)m; usleep(last_slow ? 205000 : 135000); return 0; }

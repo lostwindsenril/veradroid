@@ -26,7 +26,7 @@ home_aot() {
         o=$SYS/data/dalvik-cache/arm/system@priv-app@${ap%%:*}@${ap%%:*}.apk@classes.dex
         [ -f "$o" ] || o=$SYS/data/dalvik-cache/arm/system@app@${ap%%:*}@${ap%%:*}.apk@classes.dex
         [ -f "$o" ] || continue
-        f=$(dd if="$o" bs=4096 count=4 2>/dev/null | tr '\0' '\n' | sed -n '/^compiler-filter$/{n;p;q;}')
+        f=$(dd if="$o" bs=4096 count=4 2>/dev/null | tr '\0' '\n' 2>/dev/null | sed -n '/^compiler-filter$/{n;p;q;}')
         case "$f" in speed|everything) continue ;; esac
         # 一次只跑一个 dex2oat：应用的预编译（compile.sh）正在编、或者别的 dex2oat 在跑时等它们做完（PW4 模拟器：和微信读书的编译
         # 撞在一起、换页时，编桌面用了 1205 秒，单独编 9 秒；0.98 门禁 PW6 第一次开机两边也叠在一起）。只是排着队等前台应用的
@@ -47,6 +47,15 @@ home_aot() {
         r=$(tr -d '\r' < $W/aot.out | tail -1)
         t "aot: ${ap#*:} ${f:-?} -> speed: $r ($(awk -v a=$a0 -v b=$(cut -d' ' -f1 /proc/uptime) 'BEGIN{printf "%.0f", b-a}') s)"
     done
+}
+# 允许“未知来源”（Settings.Secure.install_non_market_apps = 1）。系统里没有“设置”应用，这个开关用户打不开；关着时 Android 里
+# 的一切安装（文件管理器 / 浏览器点 APK、应用自己的更新）都被软件包安装程序拦下：“出于安全考虑，您的手机已设置为禁止安装
+# 来源不明的应用”，点“设置”也没反应（社区 Oasis 3，0.8.13：“本地安装不了软件”）。新机型 435338c 在 afterboot 里做了，
+# 老机型线是在那之前分出来的，一直没有。每次开机都看：先在宿主侧读 settings_secure.xml（不起 JVM），不是 1 才写。
+unknown_sources_allow() {
+    grep -qs 'name="install_non_market_apps" value="1"' $SYS/data/system/users/0/settings_secure.xml && return 0
+    adb_sh 'settings put secure install_non_market_apps 1' >/dev/null 2>&1 && t "after_boot: install_non_market_apps=1 (unknown sources allowed)"
+    return 0
 }
 adb_sh() {
     # Refresh into a live container; never run host sh if vd_in fails (empty prefix).
@@ -88,7 +97,7 @@ apk_fail_reason() { # $1 = pm 输出  $2 = apk（可选，用来进一步判断�
     *INSTALL_PARSE_FAILED_*|*INSTALL_FAILED_INVALID_URI*)
         # 没下载完的 ZIP（结尾的中央目录没了，PackageManager 报 "zipro: Invalid file"）和拆分包（ZIP 里只有几个 .apk）分开说
         if [ -n "$2" ] && [ -f "$2" ]; then
-            if ! tail -c 65558 "$2" 2>/dev/null | od -An -tx1 -v | tr -d ' \n' | grep -q 504b0506; then
+            if ! tail -c 65558 "$2" 2>/dev/null | od -An -tx1 -v | tr -d ' \n' 2>/dev/null | grep -q 504b0506; then
                 echo "安装包不完整（文件结尾缺了一截，多半是下载或拷贝中断了）。请重新下载后再放进来。"; return 0
             fi
             if command -v unzip >/dev/null 2>&1; then
@@ -214,6 +223,7 @@ after_boot() {
             t "low-ram: disabled extra pkgs + zero anim"
         fi
     fi
+    unknown_sources_allow
     lmk_tune          # 运行时参数，不持久：每次开机都要做
     proc_limit_apply  # 机型文件的 PROC_LIMIT（memory.sh）：同样不持久
     trust_unlock      # 剪贴板可读（见 trust_unlock）

@@ -6,9 +6,8 @@
       "items": [
         { "name": "启动 VeraDroid", "priority": 1, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/start.sh", "exitmenu": true },
         { "name": "安装 / 更新（联网）", "priority": 2, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/install.sh online", "exitmenu": true },
-        { "name": "安装 / 更新（实验机型、老机型）", "priority": 3, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/install.sh experimental", "exitmenu": true },
-        { "name": "离线安装（documents 里的离线包）", "priority": 4, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/install.sh offline", "exitmenu": true },
-        { "name": "恢复书库入口（找不到“VeraDroid 启动”时）", "priority": 5, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/restore-entry.sh", "exitmenu": true }
+        { "name": "安装 / 更新（离线，documents 里的离线包）", "priority": 3, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/install.sh offline", "exitmenu": true },
+        { "name": "恢复书库入口（找不到“VeraDroid 启动”时）", "priority": 4, "action": "/bin/sh", "params": "/mnt/us/extensions/VeraDroid/restore-entry.sh", "exitmenu": true }
       ]
     }
   ]

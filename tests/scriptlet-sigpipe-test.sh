@@ -6,7 +6,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(dirname "$HERE")
 fail=0
-for f in VeraDroid.sh VeraDroid-Experimental.sh VeraDroid-Offline.sh VeraDroid-Update.sh VeraDroid-Launch.sh VeraDroid-Factory.sh; do
+for f in VeraDroid.sh VeraDroid-Experimental.sh VeraDroid-Offline.sh VeraDroid-Update.sh VeraDroid-Launch.sh; do
     p=$REPO/cloud/static/$f
     grep -q "^trap '' PIPE" "$p" || { echo "FAIL $f does not ignore SIGPIPE"; fail=1; continue; }
     # the header block (# Name/# Icon) must stay first

@@ -54,7 +54,11 @@ run_action() {
         ''|none) ;;
         back|home|panel|switch)
             case "$1" in back) hint back "BACK|返回" ;; home) hint home "HOME|桌面" ;; panel) hint panel "PANEL|面板" ;; switch) hint switch "SWITCH APPS|切换" ;; esac
-            touch $X/ctl/act.$1; watch_ctl act.$1 ;;
+            # 每次都写一个新文件再改名（inotify 的 MOVED_TO，桌面每次都收得到）。以前是 touch：文件已经在的话（开机时桌面还没开始听、
+            # 桌面进程被杀重启的那几秒里做了手势）touch 只改时间、桌面收不到事件，文件就一直留着，之后每次下划都是“没有响应”，
+            # 直到重启 VeraDroid（用户诊断-20261120：开机时下划了一次，之后一整天应用里拉不出面板）。
+            # 临时文件名以点开头：HostService 只认 act.*，不会把临时文件当手势吃掉；带 $$：连着两次手势不抢同一个临时文件
+            : > $X/ctl/.act.$1.$$ && mv -f $X/ctl/.act.$1.$$ $X/ctl/act.$1; watch_ctl act.$1 ;;
         kindle|return) hint kindle "KINDLE|回 Kindle"; send exit ;;
         clear|refresh) hint clear "REFRESH|清残影"; [ -p $X/epd.fifo ] && kill -0 "$(cat $W/epd.pid 2>/dev/null)" 2>/dev/null && fifo_put FULL ;;
         invert) hint invert "INVERT|反色"; send invert ;;

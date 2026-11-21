@@ -17,6 +17,15 @@ done
 # only one activity may claim them (two would pop a chooser)
 n=$(grep -c '<action android:name="android.settings.WIFI_SETTINGS"' "$M")
 [ "$n" = 1 ] || { echo "FAIL: android.settings.WIFI_SETTINGS claimed $n times"; fail=1; }
+# the package installer's "设置" button on its unknown-sources dialog (SECURITY_SETTINGS) and Android 8 apps'
+# MANAGE_UNKNOWN_APP_SOURCES: UnknownSourcesActivity turns unknown sources on and finishes (community Oasis 3, 2026-11-20)
+ublk=$(awk '/android:name="\.UnknownSourcesActivity"/{f=1} f{print} f&&/<\/activity>/{exit}' "$M")
+[ -n "$ublk" ] || { echo "FAIL: UnknownSourcesActivity not in the manifest"; fail=1; }
+printf '%s\n' "$ublk" | grep -q 'android:exported="true"' || { echo "FAIL: UnknownSourcesActivity not exported"; fail=1; }
+for a in android.settings.SECURITY_SETTINGS android.settings.MANAGE_UNKNOWN_APP_SOURCES; do
+    printf '%s\n' "$ublk" | grep -q "<action android:name=\"$a\"" || { echo "FAIL: UnknownSourcesActivity does not handle $a"; fail=1; }
+done
+grep -q 'INSTALL_NON_MARKET_APPS, 1' "$REPO/android/packages/VeraHome/src/com/veradroid/home/UnknownSourcesActivity.java" 2>/dev/null || { echo "FAIL: UnknownSourcesActivity does not turn unknown sources on"; fail=1; }
 # well-formed XML
 python3 -c 'import sys,xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' "$M" || { echo "FAIL: manifest is not well-formed"; fail=1; }
 [ $fail = 0 ] && echo "settings-intents-test: OK"

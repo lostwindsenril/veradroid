@@ -219,6 +219,26 @@ def main():
     r, txt = b.refreshes(m); p = gotp(txt)
     check(len(r) == 1 and p and r[0]['t'] - p[0] < 140, f'TURNHOLD 0: a page goes out at once again ({r[0]["t"] - p[0] if r and p else "-"} ms)')
     b.close()
+
+    print('== text edges (docs/text-sharpness.md)')
+    stub = lambda txt: [tuple(int(v) for v in re.match(r'stub: wfm=(\d+) dither=(\d+) full=(\d+)', l).groups()) for l in txt.splitlines() if l.startswith('stub: wfm=')]
+    b = Bridge(binary)
+    b.send('SET 1.0 3 0 0 1 40'); time.sleep(0.8)      # 灰度最准, hardware dithering on
+    m = b.mark(); b.page(); time.sleep(1.0)
+    _, txt = b.refreshes(m); s = stub(txt)
+    check(s and all(d == 0 for _, d, _ in s), f'a text page goes out without hardware dithering ({s})')
+    with open(b.shm, 'r+b') as f:      # a 320x320 mid-gray block: a picture
+        for y in range(400, 720):
+            f.seek(y * W * 4 + 400 * 4); f.write(bytes([128, 128, 128, 255]) * 320)
+    m = b.mark(); b.send('P 0 400 720'); time.sleep(1.0)
+    _, txt = b.refreshes(m); s = stub(txt)
+    check(s and all(d != 0 for _, d, _ in s), f'a picture keeps the hardware dithering ({s})')
+    b.send('SET 1.0 0 0 0 0 40', 'CLEAN 300'); time.sleep(0.8)   # 均衡: small changes DU, CLEAN pass after them
+    m = b.mark(); b.page(small=True); time.sleep(1.2)
+    r, txt = b.refreshes(m); s = stub(txt)
+    cl = [x for x in s if x[0] == 5]
+    check(r and r[0]['wfm'] == 1 and cl and all(f == 1 for _, _, f in cl), f'CLEAN after a DU change is GL16 FULL ({s})')
+    b.close()
     print('FAILED: %d' % fails if fails else 'all passed')
     sys.exit(1 if fails else 0)
 

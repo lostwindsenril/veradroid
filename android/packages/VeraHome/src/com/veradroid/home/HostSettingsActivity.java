@@ -18,7 +18,7 @@ import java.util.Map;
 /**
  * 以前只有宿主 / 传书网页才能改的设置，在设备上给一个入口。两页，Intent extra "page"：
  *   display  显示与刷新：旋转（KFB_ROTATE）、显示档位（KFB_SMOOTH）、局部刷新（KFB_MODE）、快速滑动（KFB_SCROLLDU）、图片灰度（KFB_IMG）、整页刷新（KFB_REAGL_MIN）、整屏闪刷（KFB_FLASH）、
- *            浅色过滤（KFB_LIGHTF）、深色加深（KFB_DARKEN）
+ *            浅色过滤（KFB_LIGHTF）、深色加深（KFB_DARKEN）、网页内核（WEBVIEW，只在宿主发 WEBVIEW_ALT_OK=1 时出现）
  *   system   系统与性能：Wi-Fi 省电（WIFI_PS）、小内存模式（LOWMEM）、Kindle 界面（KINDLE_UI）、应用预编译（APP_COMPILE + ctl/compile.status + 全部优化）
  * 每项一行“< 值 >”步进：点一下只改那一行的字（一次小刷新），同时经 HostLink.settings 写给宿主（ctl/settings.new + apply → settings.conf）。
  * 不搭列表、不滚动：一页放得下；小屏放不下时用 PageScrollView 整页翻。
@@ -31,8 +31,10 @@ public class HostSettingsActivity extends Activity {
     private final Handler handler = new Handler();
     private Map<String, String> host;
     private LinearLayout list;
-    private TextView compileView, smoothNote;
-    private CtlWatch.Listener compileWatch;
+    private TextView compileView, smoothNote, webviewView;
+    private android.widget.Button webviewBtn;
+    private String webviewAct;
+    private CtlWatch.Listener compileWatch, webviewWatch;
     private boolean system;
     private boolean rotatePending;
     private Runnable pendingRotate = new Runnable() { @Override public void run() { } };
@@ -177,6 +179,35 @@ public class HostSettingsActivity extends Activity {
         section("画面");
         stepper("浅色过滤", Panel.LIGHTF_DESC, "KFB_LIGHTF", Panel.LIGHTF_L, Panel.LIGHTF_V, "0", null);
         stepper("深色加深", Panel.DARKEN_DESC, "KFB_DARKEN", new String[] { "关", "开" }, new String[] { "0", "1" }, "0", null);
+        // 实验性新网页内核（WEBVIEW，docs/webview-alt.md）：宿主只在 1 GB 机型上发 WEBVIEW_ALT_OK=1（512 MB 机型这一段不出现）。
+        // 打开时宿主在后台下载约 80 MB 的包（ctl/webview.status 报进度），下好以后重启 Android 才换；关掉以后下次重启换回 52 并删掉下载的包。
+        if ("1".equals(host.get("WEBVIEW_ALT_OK"))) {
+            section("网页内核（实验）");
+            stepper("网页内核", "新内核（Chromium 119）能打开更多新网页（晋江验证码、新版登录页、网页书源）。打开后自动下载约 45 MB（占用约 80 MB 空间），"
+                + "重启 Android 后生效。每个用网页的应用多占几十到一百多 MB 内存，打开网页也慢一点。两个内核的网页登录各自保存："
+                + "第一次换到新内核要在网页里重新登录；关掉后重启 Android 换回自带内核（原来的登录还在），并删掉下载的新内核和它的网页数据。",
+                "WEBVIEW", new String[] { "自带（Chromium 52，默认）", "新内核（Chromium 119）" }, new String[] { "stock", "alt" }, "stock",
+                new OnSet() { @Override public void set(String v) {
+                    if ("stock".equals(v)) HostLink.cmd("webview cancel");
+                    handler.postDelayed(new Runnable() { @Override public void run() { showWebview(); } }, 1500);
+                } });
+            webviewView = Ui.text(this, "", 17, false);
+            webviewView.setPadding(0, dp(6), 0, dp(6));
+            list.addView(webviewView);
+            LinearLayout wr = new LinearLayout(this);
+            webviewBtn = Ui.button(this, "", 17, true, new View.OnClickListener() {
+                @Override public void onClick(View v) { webviewAction(); }
+            });
+            wr.addView(webviewBtn, weight());
+            list.addView(wr);
+            showWebview();
+            webviewWatch = new CtlWatch.Listener() {
+                @Override public void onCtl(final String path) {
+                    if ("webview.status".equals(path)) handler.post(new Runnable() { @Override public void run() { showWebview(); } });
+                }
+            };
+            CtlWatch.add(webviewWatch);
+        }
         LinearLayout r = new LinearLayout(this);
         r.setPadding(0, dp(12), 0, 0);
         r.addView(Ui.button(this, "立即整屏刷新一次", 17, false, new View.OnClickListener() {
@@ -232,6 +263,7 @@ public class HostSettingsActivity extends Activity {
 
     @Override protected void onDestroy() {
         if (compileWatch != null) CtlWatch.remove(compileWatch);
+        if (webviewWatch != null) CtlWatch.remove(webviewWatch);
         handler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
@@ -239,6 +271,49 @@ public class HostSettingsActivity extends Activity {
     private String appName(String pkg) {
         try { return getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg, 0)).toString(); }
         catch (Exception e) { return pkg; }
+    }
+
+    private static String mb(long b) { return String.format(java.util.Locale.US, "%.1f", b / 1048576.0); }
+
+    /** 网页内核那一行下面的状态和按钮：下载进度 / 校验 / 下好了要重启 / 出错重试 / 关掉后要重启。 */
+    private void showWebview() {
+        if (webviewView == null) return;
+        Map<String, String> set = HostLink.kv(HostLink.KFB + "settings");
+        Map<String, String> st = HostLink.kv(HostLink.CTL + "webview.status");
+        String sel = host.get("WEBVIEW"); if (sel == null || sel.length() == 0) sel = "stock";
+        String live = set.get("WEBVIEW_LIVE"), state = st.get("state");
+        boolean have = "1".equals(set.get("WEBVIEW_HAVE")) || "ready".equals(state);
+        long got = HostLink.num(st, "got", 0), total = HostLink.num(st, "total", 0);
+        String text, act = null, label = null;
+        if ("alt".equals(sel)) {
+            if ("alt".equals(live)) text = "正在用新内核（Chromium 119）。";
+            else if (have) { text = "新内核已下载。重启 Android 后生效（约 1 分钟，正在运行的应用会被关闭）。"; act = "restart"; label = "现在重启 Android"; }
+            else if ("downloading".equals(state)) {
+                text = "正在下载新内核：" + mb(got) + " / " + mb(total) + " MB" + (total > 0 ? "（" + (got * 100 / total) + "%）" : "")
+                    + (st.get("src") != null ? "\n来源：" + st.get("src") : "") + "\n下完以后重启 Android 才会换。可以离开这一页，下载在后台继续。";
+                act = "cancel"; label = "取消下载";
+            } else if ("verifying".equals(state)) text = "下载完成，正在校验…";
+            else if ("error".equals(state)) { text = "没有下载成功：" + String.valueOf(st.get("msg")); act = "get"; label = "重试"; }
+            else { text = "等待开始下载（约 45 MB）…"; act = "get"; label = "开始下载"; }
+        } else {
+            if ("alt".equals(live)) { text = "重启 Android 后换回自带内核，并删掉下载的新内核（约 80 MB）和它的网页数据。"; act = "restart"; label = "现在重启 Android"; }
+            else text = "";
+        }
+        webviewView.setText(text);
+        webviewView.setVisibility(text.length() > 0 ? View.VISIBLE : View.GONE);
+        webviewAct = act;
+        if (label != null) webviewBtn.setText(label);
+        webviewBtn.setVisibility(act != null ? View.VISIBLE : View.GONE);
+    }
+
+    private void webviewAction() {
+        if ("restart".equals(webviewAct)) {
+            new VeraDialog.Builder(this).title("重启 Android").message("现在重启 Android 换网页内核？正在运行的应用会被关闭，约 1 分钟。")
+                .negative("稍后", null).positive("现在重启", new Runnable() { @Override public void run() { HostLink.cmd("restart"); } }).show();
+        } else if (webviewAct != null) {
+            HostLink.cmd("webview " + webviewAct);
+            handler.postDelayed(new Runnable() { @Override public void run() { showWebview(); } }, 1500);
+        }
     }
 
     private void showCompile() {

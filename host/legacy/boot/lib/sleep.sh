@@ -12,12 +12,16 @@ screensaver_show() {
     smode=; sone=
     type saver_choice >/dev/null 2>&1 && saver_choice
     [ "$smode" = one ] && [ -n "$sone" ] && echo "$sone" >> "$list"
-    [ "$smode" = kindle ] || [ -s "$list" ] || for f in "$VD"/screensaver/*.[pP][nN][gG] "$VD"/screensaver/*.[jJ][pP][gG] "$VD"/screensaver/*.[jJ][pP][eE][gG] \
-             "$SYS"/data/media/0/Screensaver/*.[pP][nN][gG] "$SYS"/data/media/0/Screensaver/*.[jJ][pP][gG] "$SYS"/data/media/0/Screensaver/*.[jJ][pP][eE][gG]; do
-        [ -f "$f" ] || continue
-        case "$f" in */default.png|*/default.PNG) continue ;; esac
-        echo "$f" >> "$list"
-    done
+    # 用户图：两个文件夹里的 png / jpg / webp / bmp / gif ……（saver_is_img，大小写都行）；saver.sh 太旧时只认 png / jpg / jpeg
+    if [ "$smode" != kindle ] && [ ! -s "$list" ]; then
+        for f in "$VD"/screensaver/* "$SYS"/data/media/0/Screensaver/*; do
+            [ -f "$f" ] || continue
+            case "$f" in */default.png|*/default.PNG) continue ;; esac
+            if type saver_is_img >/dev/null 2>&1; then saver_is_img "$f" || continue
+            else case "$f" in *.[pP][nN][gG]|*.[jJ][pP][gG]|*.[jJ][pP][eE][gG]) ;; *) continue ;; esac; fi
+            echo "$f" >> "$list"
+        done
+    fi
     if [ ! -s "$list" ]; then
         # 用户没放图：用 Kindle 自带的屏保图（和原系统休眠时看到的一样）
         # 只要 bg_ss*（成人版的那组）：同一目录里还有儿童模式的 bg_kids_ss* 和一张纯黑的 bg_kcblackbackground.png
@@ -43,24 +47,44 @@ screensaver_show() {
     [ "${n:-0}" -gt 0 ] || return 0
     i=$(cat "$W/saver.index" 2>/dev/null || echo 0)
     case "$i" in ''|*[!0-9]*) i=0 ;; esac
-    i=$(( (i % n) + 1 ))
+    # 轮到的这张用不了（格式不认识、坏图、fbink 画不出来）就试下一张，最多试 8 张；都不行用 Kindle 自带的
+    k=0
+    while [ $k -lt "$n" ] && [ $k -lt 8 ]; do
+        k=$((k + 1))
+        i=$(( (i % n) + 1 ))
+        img=$(sed -n "${i}p" "$list")
+        [ -n "$img" ] || continue
+        sdraw=$img
+        type saver_resolve >/dev/null 2>&1 && saver_resolve "$img"
+        [ -n "$sdraw" ] || continue
+        saver_draw "$sdraw" "$img" && { echo "$i" > "$W/saver.index"; return 0; }
+    done
     echo "$i" > "$W/saver.index"
-    img=$(sed -n "${i}p" "$list")
-    [ -n "$img" ] || return 0
+    for f in /usr/share/blanket/screensaver/bg_ss*.png "$VD/screensaver/default.png"; do
+        [ -f "$f" ] && [ "$f" != "$img" ] || continue
+        saver_draw "$f" "$f" && return 0
+    done
+    return 0
+}
+# 画一张屏保：$1 = 要画的文件（可能是桌面转好的灰度 PNG），$2 = 原图（写日志用）。画上了返回 0。
+saver_draw() {
+    sv_note=; [ "$1" != "$2" ] && sv_note=" (converted copy)"
     if [ -x "$FBINK" ]; then
         # PNG 文件头第 26 个字节是颜色类型：4 / 6 带透明通道
-        ct=$(dd if="$img" bs=1 skip=25 count=1 2>/dev/null | od -An -tu1 2>/dev/null | tr -d ' ')
-        case "$(dd if="$img" bs=1 skip=1 count=3 2>/dev/null)" in PNG) ;; *) ct= ;; esac
+        ct=$(dd if="$1" bs=1 skip=25 count=1 2>/dev/null | od -An -tu1 2>/dev/null | tr -d ' ')
+        case "$(dd if="$1" bs=1 skip=1 count=3 2>/dev/null)" in PNG) ;; *) ct= ;; esac
         if [ "$ct" = 4 ] || [ "$ct" = 6 ]; then
-            "$FBINK" -q -f -i "$img" -g w=-2,h=-2,halign=CENTER,valign=CENTER >/dev/null 2>&1 && { t "screensaver: $img (transparent, over the page)"; return 0; }
+            "$FBINK" -q -f -i "$1" -g w=-2,h=-2,halign=CENTER,valign=CENTER >/dev/null 2>&1 && { t "screensaver: $2$sv_note (transparent, over the page)"; return 0; }
         else
-            "$FBINK" -q -c -f -i "$img" -g w=-2,h=-2,halign=CENTER,valign=CENTER >/dev/null 2>&1 && { t "screensaver: $img"; return 0; }
+            "$FBINK" -q -c -f -i "$1" -g w=-2,h=-2,halign=CENTER,valign=CENTER >/dev/null 2>&1 && { t "screensaver: $2$sv_note"; return 0; }
         fi
-        t "screensaver: fbink could not draw $img"
+        t "screensaver: fbink could not draw $2$sv_note"
     fi
-    # 没有带图片支持的 fbink 时退回 Kindle 自带的 eips（PW6 上只认 PNG）
-    case "$img" in *.[pP][nN][gG]) /usr/sbin/eips -g "$img" >/dev/null 2>&1 && return 0 ;; esac
-    [ -f "$VD/screensaver/default.png" ] && /usr/sbin/eips -g "$VD/screensaver/default.png" >/dev/null 2>&1 || true
+    # 没有带图片支持的 fbink 时退回 Kindle 自带的 eips（PW6 上只认 PNG：看文件头，不看扩展名）
+    case "$(dd if="$1" bs=1 skip=1 count=3 2>/dev/null)" in
+    PNG) /usr/sbin/eips -g "$1" >/dev/null 2>&1 && { t "screensaver: $2$sv_note (eips)"; return 0; } ;;
+    esac
+    return 1
 }
 sleep_watch() {
     # Do not subscribe to lipc-wait-event: on PW6/5.19 it writes its monitor

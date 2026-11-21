@@ -22,8 +22,9 @@ bgnice_tick() {
         [ -d /proc/$bp ] || { rm -f "$f"; continue; }
         badj=$(cat /proc/$bp/oom_score_adj 2>/dev/null)
         if [ "$bn" = 0 ] || [ -z "$badj" ] || [ "$badj" -lt "$ba" ] 2>/dev/null; then
-            while read -r bt bo; do [ -d /proc/$bp/task/$bt ] && renice "$bo" -p "$bt" >/dev/null 2>&1; done < "$f"
-            # 降着的时候新开的线程继承了 BG_NICE，没有记录：放回 0
+            while read -r bt bo; do [ "$bo" = - ] && continue; [ -d /proc/$bp/task/$bt ] && renice "$bo" -p "$bt" >/dev/null 2>&1; done < "$f"
+            # 降着的时候新开的线程继承了 BG_NICE，没有记录：放回 0。降的时候就在、本来就 >= BG_NICE 的线程（应用自己设的后台线程，
+            # 记成 “tid -”）不动：以前它们也没有记录，回到前台时被一起抬到 0，后台线程和界面线程抢 CPU（社区报告）
             for tt in /proc/$bp/task/[0-9]*; do
                 bt=${tt##*/}; grep -q "^$bt " "$f" && continue
                 { read -r ts < $tt/stat; } 2>/dev/null || continue
@@ -48,7 +49,7 @@ bgnice_tick() {
             { read -r ts < $tt/stat; } 2>/dev/null || continue
             bo=$(echo "${ts##*) }" | awk '{print $17}')    # nice（stat 的第 19 个字段）
             case "$bo" in ''|*[!0-9-]*) continue ;; esac
-            [ "$bo" -ge "$bn" ] 2>/dev/null && continue     # 本来就更低（后台线程 THREAD_PRIORITY_BACKGROUND = 10）
+            [ "$bo" -ge "$bn" ] 2>/dev/null && { echo "$bt -" >> $W/bgnice/$bp.tmp; continue; }     # 本来就更低（后台线程 THREAD_PRIORITY_BACKGROUND = 10）：记下，放回时不动
             renice "$bn" -p "$bt" >/dev/null 2>&1 && echo "$bt $bo" >> $W/bgnice/$bp.tmp
         done
         mv -f $W/bgnice/$bp.tmp $W/bgnice/$bp

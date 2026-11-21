@@ -9,6 +9,30 @@ for m in settings memory freeze framework container input network tester; do . "
 [ "$1" = "--stale" ] || { test_on && tup > $W/test.stop0 2>/dev/null; }
 [ "$1" = "--stale" ] || echo "[$(date +%H:%M:%S)] stop.sh called (parent $PPID: $(tr '\000' ' ' < /proc/$PPID/cmdline 2>/dev/null | cut -c1-120))${VD_STOP_REASON:+ reason: $VD_STOP_REASON}" >> $LOG
 STALE=; [ "$1" = "--stale" ] && STALE=1
+# --stale 的快速路径（社区报告：上一次退出得干干净净时，启动前这一段也要空转好几秒，单核上还和启动抢 CPU）。
+# 判断一律从严，有一点拿不准就照旧走完整流程：
+#  - $W 里只有完整停止以后本来就留着的东西（STALE_KEEP，下面的完整流程不碰它们）和这次启动自己的锁 starting；
+#    pid 文件、显示通道 kfb、冻结组、模式标记……任何一个在都不算干净；
+#  - 没有容器的挂载（$R、$SYS/ 下面；$SYS 本身是 common.sh 刚挂上的）、没有容器进程（unshare --in-ns、slirp4netns、
+#    根目录在系统盘上的进程）；没有正在跑的完整 stop.sh。
+# 干净时也不卸下系统盘：common.sh 刚挂上，卸下来 veradroid.sh 马上又要再挂一次（再跑一次 e2fsck）。
+# 完整停止以后 $W 里还留着的（PW4 模拟器 0.8.13 实测）：常驻的自动更新 / 测试看守和它们的 pid、上次的日志和画面状态、
+# 设置的副本。下面的完整流程不碰它们（input.log 除外：它只是删掉一个日志，触摸前端下次启动时重写）。
+STALE_KEEP="appprof.pkg auto-update.sh autoupdate.pid bat.logt bat.start bgnice docs.before docs.missing gestures inject input.log poem shutw.log splash.cells splash.last splash.t0 splash.txt ss.pid stop-shutdown.sh submodel tester-watch.sh testwatch.pid tz.android uiderr.lines vdkaf.log"
+stale_clean() {
+    sc_p=$(cat "${VD_STOP_PIDF:-/tmp/veradroid-stop.pid}" 2>/dev/null); [ -n "$sc_p" ] && kill -0 "$sc_p" 2>/dev/null && return 1
+    for sc_f in $(ls -A $W 2>/dev/null); do
+        for sc_k in starting $STALE_KEEP; do case "$sc_f" in $sc_k) continue 2 ;; esac; done
+        return 1
+    done
+    awk -v r="$R" -v s="$SYS/" '$2 == r || index($2, r "/") == 1 || index($2, s) == 1 { f = 1 } END { exit f }' "${VD_MOUNTS:-/proc/mounts}" || return 1
+    [ -d $FZ ] && return 1
+    [ -z "$(pgrep -f "^unshare -m -u -i -n -p -f -- sh .*--in-ns" 2>/dev/null)" ] || return 1
+    [ -z "$(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null)" ] || return 1
+    [ -z "$(chroot_pids)" ] || return 1
+    return 0
+}
+if [ -n "$STALE" ] && stale_clean; then t "stop --stale: nothing left from the previous run" >> $LOG 2>/dev/null; exit 0; fi
 # 完整的 stop 和下一次启动不能叠在一起：负载高时 stop 可能跑很久，晚到的清理会删掉新一轮的 $W/fw、$W/kfb（kt5 模拟器实测）。
 # veradroid.sh 启动前会等这个 pid 结束。放在 /tmp：$W 里的东西本脚本自己会删。
 if [ -z "$STALE" ]; then echo $$ > /tmp/veradroid-stop.pid; trap 'rm -f /tmp/veradroid-stop.pid' EXIT; fi
@@ -44,7 +68,7 @@ RS=; [ -f $W/restarting ] && RS=1
 [ -d $FZ ] && android_thaw 2>/dev/null          # 冻着的进程收不到 SIGKILL
 type net_resume >/dev/null 2>&1 && net_resume     # 冻结时停下的 slirp4netns（freeze.sh）：停着收不到 SIGTERM
 ps=
-for f in watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do
+for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do
     p=$(cat $W/$f.pid 2>/dev/null)
     [ "$p" = "$PPID" ] && continue              # 看门狗自己调的：它在等这个脚本跑完
     [ "$p" = "$$" ] && continue                 # vdshutwatch exec 成了本脚本：pid 就是自己
@@ -52,7 +76,7 @@ for f in watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do
     # 只限这几个循环：cmd 的子进程里有脱离出去的卸载 / 整包更新，不能杀
     # legacy：after_boot 在容器里跑命令用的是 chroot /proc/<init>/root（没有 PID 命名空间可进），这些子进程不会随容器
     # 一起死；after_boot 不停，它就在我们杀完容器之后继续起新的，占着系统盘（PW3 模拟器实测：返回 Kindle 后系统盘卸不掉）
-    case "$f" in watchdog|sleep|lipc|usb|boot|afterboot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
+    case "$f" in guard|watchdog|sleep|lipc|usb|boot|afterboot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
     [ -n "$p" ] && kill $p 2>/dev/null && ps="$ps $p"
 done
 # 预编译的看守循环（compile_hold 起的，pid 在 compile.guard）也写 $LOG：一起停。工作进程看到 compile.quit 就不再开始新的等待
@@ -70,7 +94,7 @@ done
 for p in $ps; do kill -9 $p 2>/dev/null; done
 kmsg "helpers and container killed"
 for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null); do kill $p 2>/dev/null; done
-for f in watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do rm -f $W/$f.pid; done
+for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do rm -f $W/$f.pid; done
 rm -rf $W/compile.quit $W/compile.guard $W/compile.stale $W/compile.lock $W/compile.queue $W/compile.total $W/compile.index $W/booted $W/pkglist.stamp $W/wifi.rx $W/wifi.busy
 croot=$(chroot_root)        # legacy：容器根的 设备号:inode，要在删 $W/pid、杀 init 之前记下来（之后就读不到了）
 input_stop

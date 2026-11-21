@@ -74,7 +74,7 @@ EOF
     grep -q '\. "\$VD/boot/lib/usb.sh"' $H/boot/lib/common.sh || bad "$H: common.sh does not load usb.sh"
     grep -A3 '^start_helpers()' $H/boot/veradroid.sh >/dev/null && awk '/^start_helpers\(\)/{p=1} p&&/^}/{exit} p' $H/boot/veradroid.sh | grep -q usb_watch_start || bad "$H: start_helpers does not start the USB watch"
     awk '/^do_exit\(\)/{p=1} p&&/^}/{exit} p' $H/boot/lib/watchdog.sh | grep -q usb_watch_stop || bad "$H: do_exit does not stop the USB watch"
-    [ "$(grep -c 'for f in watchdog sleep lipc usb cmd' $H/boot/stop.sh)" = 2 ] && grep -q 'case "$f" in watchdog|sleep|lipc|usb|' $H/boot/stop.sh || bad "$H: stop.sh does not clean up usb.pid"
+    [ "$(grep -c 'for f in \(guard \)\{0,1\}watchdog sleep lipc usb cmd' $H/boot/stop.sh)" = 2 ] && grep -q -e 'case "$f" in watchdog|sleep|lipc|usb|' -e 'case "$f" in guard|watchdog|sleep|lipc|usb|' $H/boot/stop.sh || bad "$H: stop.sh does not clean up usb.pid"
     grep -q 'usbswitch) type usb_switch' $H/boot/lib/cmd.sh && grep -q 'usbnoask)  type usb_noask' $H/boot/lib/cmd.sh || bad "$H: cmd.sh usbswitch / usbnoask"
     [ "$(grep -c 'for k in .* USB_ASK[ ;]' $H/boot/lib/settings.sh)" = 2 ] && grep -q '^    USB_ASK=1 ' $H/boot/lib/settings.sh || bad "$H: USB_ASK not a known setting"
 done

@@ -367,6 +367,25 @@ RDME
         echo "webview --skip-gpu-data-loading --disable-gpu" > $SYS/data/local/tmp/webview-command-line
     fi
     chmod 644 $SYS/data/local/tmp/webview-command-line
+    # 新网页内核：打开了开关但上次没下完（下载中途重启了 Android）：接着下（断点续传）
+    [ "${WEBVIEW:-stock}" = alt ] && type webview_ok >/dev/null 2>&1 && ! webview_ok && ! lowmem_ram && webview_dl
+    # 新网页内核（WEBVIEW=alt，container.sh webview_prepare）：系统应用开机时不编，没有编好的代码时每个应用都解释执行它的
+    # Java 部分（dex 只有约 2 MB）。后台编一次 speed（进 dalvik-cache；换回 52 时 webview_prepare 删掉）。
+    if [ "$(cat $W/webview.mode 2>/dev/null)" = alt ] && [ ! -s $SYS/data/dalvik-cache/arm/system@vendor@app@webview-alt@webview.apk@classes.dex ]; then
+        ( sleep 60; adb_sh_t 300 "cmd package compile -m speed $WEBVIEW_ALT_PKG" >/dev/null 2>&1
+          t "webview: alt compiled: $(ls -s $SYS/data/dalvik-cache/arm/system@vendor@app@webview-alt@webview.apk@classes.dex 2>/dev/null | awk '{print $1}') KB" ) </dev/null >/dev/null 2>&1 &
+    fi
+    # 119 的后台服务（:webview_service 进程：变体种子、指标上传、组件更新、崩溃上报；:webview_apk：组件更新）在我们这里都没用
+    # （没有 Google 服务器的种子、不上传），每次用网页都被拉起来，约 13–20 MB。换到 119 后关掉一次（pm disable，持久），
+    # 换回 52 时 webview_prepare 删掉记号，再换过来重新关。模拟器实测：关掉以后这两个进程不再出现，EinkBro / 网页照常。
+    # 改内核包的组件状态会让 WebViewUpdateService 结束正在用这个内核的应用（模拟器上开着的 EinkBro 被关掉了）：开机一完成就做，
+    # 那时还没有应用在用网页；每次换到 119 只做这一次。
+    if [ "$(cat $W/webview.mode 2>/dev/null)" = alt ] && [ "$(cat $SYS/webview.svcoff 2>/dev/null)" != "$WEBVIEW_ALT_APK_SHA" ]; then
+        ( sleep 5; wso=; for c in services.VariationsSeedServer services.AwVariationsSeedFetcher services.MetricsBridgeService services.MetricsUploadService \
+                services.ComponentsProviderService services.CrashReceiverService services.AwMinidumpUploadJobService nonembedded.AwComponentUpdateService; do
+              wso="$wso pm disable $WEBVIEW_ALT_PKG/org.chromium.android_webview.$c >/dev/null 2>&1;"; done
+          adb_sh_t 300 "$wso" && echo "$WEBVIEW_ALT_APK_SHA" > $SYS/webview.svcoff && t "webview: 119 background services disabled" ) </dev/null >/dev/null 2>&1 &
+    fi
     local d=$VD/apps f
     # 装好后删不掉的安装包（KT6 / Scribe 5.17+ 的加密存储上，中文文件名的 rm 会失败：用户诊断，
     # 每次进 Android 都把微信读书重装一遍，正在看书时被强制关掉）：按 名字 大小 修改时间 记下，以后跳过

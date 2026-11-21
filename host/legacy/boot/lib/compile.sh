@@ -31,18 +31,29 @@ CLOG=$SYS/data/.vd-compile.log     # 结果记录（包 过滤器 秒数 结果�
 
 # 当前这个安装（/data/app/<包>-N）的 odex 用的编译过滤器；没有 odex 时输出空
 odex_filter() { # pkg
-    for d in $SYS/data/app/"$1"-*; do
+    for d in $SYS/data/app/$(app_dir "$1"); do
         [ -d "$d" ] || continue
         for o in "$d"/oat/arm/base.odex "$d"/oat/arm64/base.odex; do
             [ -f "$o" ] || continue
             # OAT 头在 ELF 的 oatdata 段开头（PW6 / KT6 的 7.1 镜像实测在 0x1000），key-value 区是 \0 分隔的字符串对
-            dd if="$o" bs=4096 count=4 2>/dev/null | tr '\0' '\n' | sed -n '/^compiler-filter$/{n;p;q;}'
+            dd if="$o" bs=4096 count=4 2>/dev/null | tr '\0' '\n' 2>/dev/null | sed -n '/^compiler-filter$/{n;p;q;}'
             return 0
         done
     done
 }
 # 当前安装的代码目录（/data/app/<包>-N 的 N），用来区分“同一个安装编译失败过”和“已经更新成新版本”
-app_dir() { for d in $SYS/data/app/"$1"-*; do [ -d "$d" ] && { echo "${d##*/}"; return 0; }; done; return 1; }
+# 有两个目录时（安装 / 更新途中 Android 被停、Kindle 重启，旧的 <包>-1 没删掉：模拟器 2026-11-20）用 packages.xml 里的 codePath，
+# 不然编译、查 odex、保住 odex（compile_keep_*）都会对着那个没人用的目录
+app_dir() {
+    ad_n=; ad_f=
+    for d in $SYS/data/app/"$1"-*; do [ -d "$d" ] && { ad_n=$((ad_n + 1)); [ -n "$ad_f" ] || ad_f=${d##*/}; }; done
+    [ -n "$ad_f" ] || return 1
+    if [ "$ad_n" -gt 1 ]; then
+        ad_c=$(sed -n "s#.*<package name=\"$1\" codePath=\"/data/app/\([^\"/]*\)\".*#\1#p" $SYS/data/system/packages.xml 2>/dev/null | head -n 1)
+        [ -n "$ad_c" ] && [ -d "$SYS/data/app/$ad_c" ] && ad_f=$ad_c
+    fi
+    echo "$ad_f"
+}
 # 数据区里装的第三方应用（系统应用已经在镜像里预编译）
 data_pkgs() {
     for d in $SYS/data/app/*-[0-9]*; do
@@ -131,8 +142,8 @@ compile_fix_invalid() {
         for p in $(compile_invalid_pkgs); do
             compile_held && break
             [ -f $W/frozen ] || [ -f $W/saver_frozen ] && break
-            adb_sh "cmd package compile -m interpret-only -f $p" > $W/compile.inv.out 2>&1 &
-            compile_babysit $! "$p"; wait $!
+            compile_pm_start "$p" $W/compile.inv.out -m interpret-only -f "$p"
+            compile_babysit $cp_ "$p"; compile_pm_wait
             t "compile: $p had no usable odex, interpret-only -> $(odex_filter "$p") ($(tr '\n' ' ' < $W/compile.inv.out | cut -c1-60))"
         done
     ) </dev/null >>$LOG 2>&1 &
@@ -328,45 +339,63 @@ compile_mem_need() {
 compile_mem_ok() { [ "$(mem_avail_mb)" -ge "$(compile_mem_need)" ]; }
 # 编着的时候用户在用、可用内存掉到这以下：停掉，等空闲再编
 compile_active_abort_mb() { if lowmem_ram; then echo ${COMPILE_ACTIVE_ABORT_MB_LOW:-100}; else echo ${COMPILE_ACTIVE_ABORT_MB:-200}; fi; }
-# 只停给某一个包编译的 dex2oat / patchoat
+# 只停给某一个包编译的 dex2oat / patchoat。返回 0 = 真的停掉了至少一个；1 = 一个也没找到 / 没杀掉
+# （cmd package compile 还没起 dex2oat、或者 dex2oat 刚好在换文件）。以前不看结果：babysit 当成已经停了、不再试，
+# 连超时也不查了，dex2oat 照样编完（Oasis 2 用户日志：busy 停了个空，590 秒后 Success，又被当成 aborted 强制重排）。
 compile_preempt_pkg() { # pkg
+    cpp_r=1
     for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do
         pk=$( { tr '\0' '\n' < /proc/$p/cmdline; for fd in /proc/$p/fd/*; do readlink "$fd"; done; } 2>/dev/null |
               sed -n 's#.*/data/app/\([A-Za-z0-9._]*\)-[0-9][0-9]*/.*#\1#p' | head -n 1)
-        [ "$pk" = "$1" ] && kill -9 "$p" 2>/dev/null
+        [ "$pk" = "$1" ] && kill -9 "$p" 2>/dev/null && cpp_r=0
     done
+    return $cpp_r
+}
+# babysit 决定停掉这个包的编译：停到了才记原因（compile.abort）、算 killed；没停到下一轮（2 秒后）再试，同一个原因只记一次日志
+compile_babysit_stop() { # 原因 包 日志
+    if compile_preempt_pkg "$2"; then
+        t "$3"; echo "$1" > $W/compile.abort; killed=$1
+    elif [ "$cbs_miss" != "$1" ]; then
+        cbs_miss=$1; t "compile: wanted to stop dexopt of $2 ($1) but found no dex2oat / patchoat for it yet, retrying"
+    fi
 }
 # dex2oat 是 Android 的 installd 起的，不是我们的子进程：自己的 nice 管不到它。编译期间每 2 秒把所有
 # dex2oat 线程调成 nice 19 + IO 空闲（ionice -c3；没有 ionice 就只调 nice）。内存低到危险时直接杀掉 dex2oat：
 # 编译失败只是应用继续用解释执行，总比让 lowmemorykiller 杀前台应用或让机器换页卡死好。
 compile_babysit() { # cmd 的 pid [包]
-    killed=; t0=$(cut -d. -f1 /proc/uptime)
+    killed=; cbs_miss=; t0=$(cut -d. -f1 /proc/uptime)
     # 没有能用代码的应用（compile_nocode，开始编之前判断：-f 一开始就把旧 odex 删了）：到了前台 / 起了进程也不停
     nocode=; [ -n "$2" ] && [ -f $W/compile.nocode_now ] && nocode=1
     while kill -0 "$1" 2>/dev/null; do
+        # 已经决定停（killed 是原因）：cmd 还没返回时每一轮都再停一次这个包的 dex2oat / patchoat，不记日志
+        [ -n "$2" ] && [ -n "$killed" ] && [ "$killed" != memory ] && compile_preempt_pkg "$2"
         # 正在编的应用被打开到了前台：停掉，等它离开前台再编（compile_one 重新排队）
         if [ -n "$2" ] && [ -z "$killed" ] && [ -z "$nocode" ] && [ "$(compile_fg)" = "$2" ]; then
-            t "compile: $2 came to the foreground, stopping its dexopt (will finish after it leaves the foreground)"
-            echo foreground > $W/compile.abort; compile_preempt_pkg "$2"; killed=1
+            compile_babysit_stop foreground "$2" "compile: $2 came to the foreground, stopping its dexopt (will finish after it leaves the foreground)"
         fi
         # 编着的时候这个应用起了进程（点开了 / 后台服务被拉起）：它拿到的是没写完的 odex，停掉，等它退出再编
         if [ -n "$2" ] && [ -z "$killed" ] && [ -z "$nocode" ] && compile_app_running "$2"; then
-            t "compile: $2 started while it was being compiled, stopping its dexopt (will finish after it exits)"
-            echo running > $W/compile.abort; compile_preempt_pkg "$2"; killed=1
+            compile_babysit_stop running "$2" "compile: $2 started while it was being compiled, stopping its dexopt (will finish after it exits)"
         fi
         # 用户在用、内存紧：停掉，等空闲再编
         if [ -n "$2" ] && [ -z "$killed" ] && compile_user_active && [ "$(mem_avail_mb)" -lt "$(compile_active_abort_mb)" ]; then
-            t "compile: device in use and only $(mem_avail_mb) MB available, stopping dexopt of $2 (will retry when idle)"
-            echo busy > $W/compile.abort; compile_preempt_pkg "$2"; killed=1
+            compile_babysit_stop busy "$2" "compile: device in use and only $(mem_avail_mb) MB available, stopping dexopt of $2 (will retry when idle)"
         fi
         # 自己的超时（dex2oat 自带的 9.5 分钟看门狗已用 --no-watch-dog 关掉）：默认 540 秒，必须小于 PackageManager 的 10 分钟看门狗。
         # 一次编译期间 PackageManager 一直拿着安装锁（mInstallLock）；这时它自己的线程上任何要这把锁的事（Android 里的安装 / 卸载 /
         # 清数据 / 查应用大小、装完的收尾 rmPackageDir）都排在后面，排满 10 分钟 system_server 就被自己的 Watchdog 杀掉、软重启
         # （pw5-5182 模拟器两次："Blocked in handler on PackageManager"，PackageManager 线程停在 InstallerConnection 上，
         # 持锁的正是微信读书 653 / 679 秒的 speed 编译；用户看到的是用着应用突然回到开机画面）。以前默认 40 分钟。
-        if [ $(( $(cut -d. -f1 /proc/uptime) - t0 )) -ge ${COMPILE_MAX_S:-540} ] && [ -z "$killed" ]; then
-            t "compile: still running after ${COMPILE_MAX_S:-540}s, aborting dex2oat"
-            for p in $(pgrep dex2oat 2>/dev/null); do kill -9 "$p" 2>/dev/null; done; killed=1; echo timeout > $W/compile.abort
+        # 不管前面停没停过（以前 killed 了就不查：停了个空的那次 dex2oat 一直编到 590 秒），过了时间还有 dex2oat 就每一轮都杀。
+        if [ $(( $(cut -d. -f1 /proc/uptime) - t0 )) -ge ${COMPILE_MAX_S:-540} ]; then
+            cbs_k=
+            for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do kill -9 "$p" 2>/dev/null && cbs_k=1; done
+            if [ -z "$killed" ]; then
+                t "compile: still running after ${COMPILE_MAX_S:-540}s, aborting dex2oat"
+                killed=timeout; echo timeout > $W/compile.abort
+            elif [ -n "$cbs_k" ] && [ "$cbs_miss" != timeout ]; then
+                cbs_miss=timeout; t "compile: dex2oat still running ${COMPILE_MAX_S:-540}s after start although stopped ($killed), killed again"
+            fi
         fi
         for p in $(pgrep dex2oat 2>/dev/null); do
             for tk in /proc/$p/task/*; do
@@ -376,11 +405,154 @@ compile_babysit() { # cmd 的 pid [包]
             done
             if [ "$(mem_avail_mb)" -lt "${COMPILE_ABORT_MB:-40}" ] && [ -z "$killed" ]; then
                 t "compile: memory critically low ($(mem_avail_mb) MB available), aborting dex2oat $p"
-                kill -9 "$p" 2>/dev/null; killed=1; echo memory > $W/compile.abort
+                kill -9 "$p" 2>/dev/null && { killed=memory; echo memory > $W/compile.abort; }
             fi
         done
         sleep 2
     done
+}
+# 编译期间保住原来的 odex（2026-11-20，PW6 模拟器：刚装好的微信读书 / 番茄在后台编译时打开，
+# ClassNotFoundException / Unable to instantiate application，第二次打开又好了）。Android 7.1 的 installd 每次 dexopt 都先
+# unlink 掉 oat/<isa>/base.odex（和 base.art），再在同一个路径上 O_EXCL 新建、让 dex2oat 往里写；dex2oat 失败 / 被停掉时再按路径
+# unlink 掉没写完的文件。所以整个编译期间（大应用几分钟）以及编译失败 / 被停以后，应用都没有能用的 odex，只能从 apk 现解压 dex、
+# 校验、解释执行（又慢又占内存；模拟器上编译期间这一步还会偶尔校验失败：Bad checksum → 找不到类 → 崩）。
+# 现在：编译前把原来的 odex / art 硬链接一份（.vd-keep.*）；installd 新建的文件一出现就把它也硬链接走（.vd-new.*，dex2oat 继续
+# 通过 fd 往同一个 inode 写），再把原来的那份原子地 rename 回 base.*：应用打开时看到的始终是原来那份完整的 odex。
+# 编成功（cmd 说 Success）才把新的 rename 到 base.*；失败 / 被停 / 超时：installd 按路径删掉的是原来那份的一个名字，
+# 从 .vd-keep 再放回去，没写完的新文件删掉。窗口只剩 installd 新建到看守进程发现之间（≤ 0.2 秒）。
+# 只管 base（本项目里没有分包 apk）；没有原来的 odex（或者它不是完整的 ELF）时和以前一样。
+compile_oat_dir() { # pkg -> 宿主路径 $SYS/data/app/<包>-N/oat/<isa>（已有的那个）
+    cod_d=$(app_dir "$1") || return 1
+    for cod_i in arm arm64; do
+        [ -d "$SYS/data/app/$cod_d/oat/$cod_i" ] && { echo "$SYS/data/app/$cod_d/oat/$cod_i"; return 0; }
+    done
+    return 1
+}
+compile_elf_ok() { [ -s "$1" ] && [ "$(dd if="$1" bs=4 count=1 2>/dev/null | tail -c 3)" = ELF ]; }   # 写完的 oat 才有 ELF 头（dex2oat 最后才写）
+# 编译开始前：把原来的 odex / art 硬链接成 .vd-keep.*。输出要保护的 oat 目录；没有可保的返回 1
+compile_keep_begin() { # pkg
+    ckb_o=$(compile_oat_dir "$1") || return 1
+    rm -f "$ckb_o"/.vd-keep.* "$ckb_o"/.vd-new.* "$ckb_o"/.vd-tmp.* 2>/dev/null
+    compile_elf_ok "$ckb_o/base.odex" || return 1
+    ln -f "$ckb_o/base.odex" "$ckb_o/.vd-keep.odex" 2>/dev/null || return 1
+    [ -f "$ckb_o/base.art" ] && ln -f "$ckb_o/base.art" "$ckb_o/.vd-keep.art" 2>/dev/null
+    echo "$ckb_o"
+}
+# 把 base.<ext> 放回原来那份（.vd-keep.<ext>；没有原来那份就删掉 base.<ext>）。rename 是原子的：打开它的进程要么拿到旧的、要么拿到新的
+compile_keep_put() { # dir ext
+    if [ -f "$1/.vd-keep.$2" ]; then
+        [ "$1/base.$2" -ef "$1/.vd-keep.$2" ] && return 0
+        ln -f "$1/.vd-keep.$2" "$1/.vd-tmp.$2" && mv -f "$1/.vd-tmp.$2" "$1/base.$2"
+    else rm -f "$1/base.$2"; fi
+}
+# installd 新建了 base.<ext>（和原来那份不是一个 inode，也不是已经挪走的那个）：硬链接到 .vd-new.<ext>，base.<ext> 放回原来那份
+compile_keep_divert() { # dir ext
+    [ -f "$1/base.$2" ] || return 1
+    [ -f "$1/.vd-keep.$2" ] && [ "$1/base.$2" -ef "$1/.vd-keep.$2" ] && return 1
+    [ -f "$1/.vd-new.$2" ] && [ "$1/base.$2" -ef "$1/.vd-new.$2" ] && { compile_keep_put "$1" "$2"; return 0; }
+    ln -f "$1/base.$2" "$1/.vd-new.$2" 2>/dev/null || return 1
+    compile_keep_put "$1" "$2"
+}
+# 看守进程（cmd package compile 跑着时在后台）：每 0.2 秒看一次，新建的挪走、原来的放回；已经挪走过而 base.odex 没了（installd 失败
+# 时按路径删的）也马上放回。cmd 结束后按结果收尾（compile_keep_end）。
+compile_keep_guard() { # cmd 的 pid  oat 目录  输出文件
+    while kill -0 "$1" 2>/dev/null; do
+        compile_keep_divert "$2" odex; compile_keep_divert "$2" art
+        [ -f "$2/.vd-new.odex" ] && [ ! -f "$2/base.odex" ] && compile_keep_put "$2" odex
+        usleep 200000 2>/dev/null || sleep 1
+    done
+    compile_keep_end "$2" "$3"
+}
+compile_keep_end() { # oat 目录  输出文件
+    compile_keep_divert "$1" odex; compile_keep_divert "$1" art
+    if grep -q Success "$2" 2>/dev/null && compile_elf_ok "$1/.vd-new.odex"; then
+        # 编成了：新的换上去。这次没有生成 app image（不是按档案编的）就不能留着原来那份 art（它属于原来的 odex）
+        mv -f "$1/.vd-new.odex" "$1/base.odex"
+        if [ -f "$1/.vd-new.art" ]; then mv -f "$1/.vd-new.art" "$1/base.art"; else rm -f "$1/base.art"; fi
+        touch -r "$1/../../base.apk" "$1/base.odex" 2>/dev/null   # installd 的 utime（它按路径改到了原来那份上）
+        t "compile: new odex of ${1#$SYS/data/app/} in place, the old one was kept until it was complete"
+    elif [ -f "$1/.vd-new.odex" ]; then
+        compile_keep_put "$1" odex; compile_keep_put "$1" art
+        t "compile: compile of ${1#$SYS/data/app/} did not finish, the previous odex is back in place"
+    else
+        # installd 根本没有新建（PackageManager 不在、等锁时被停了、不需要编）：确认原来的还在
+        compile_keep_put "$1" odex; [ -f "$1/.vd-keep.art" ] && compile_keep_put "$1" art
+    fi
+    rm -f "$1"/.vd-keep.* "$1"/.vd-new.* "$1"/.vd-tmp.* 2>/dev/null
+}
+# 起一次 cmd package compile（后台）：有原来的 odex 就带看守。设 cp_（cmd 的 pid，给 compile_babysit）和 cpg_（看守的 pid）；
+# 之后调用方 compile_pm_wait 拿返回码（等看守收尾完，之后读到的 odex_filter 才是最终的）
+compile_pm_start() { # pkg 输出文件 cmd 参数...
+    cps_p=$1; cps_out=$2; shift 2
+    cps_o=$(compile_keep_begin "$cps_p")
+    adb_sh "cmd package compile $*" > "$cps_out" 2>&1 &
+    cp_=$!; cpg_=
+    if [ -n "$cps_o" ]; then compile_keep_guard $cp_ "$cps_o" "$cps_out" </dev/null >>$LOG 2>&1 & cpg_=$!; fi
+}
+compile_pm_wait() {
+    wait $cp_; cpw_r=$?
+    [ -n "$cpg_" ] && wait $cpg_
+    return $cpw_r
+}
+# 上一次的工作进程没收尾就没了（停 Android / 宿主脚本被杀）：留下的 .vd-keep / .vd-new 收拾掉。base.odex 是完整的 ELF 就留着
+# （挪走前 / 编完换上的），不是（没了、或者是没写完的新文件）就放回原来那份。正在给这个包编的 dex2oat 还在时不动。
+compile_keep_cleanup() {
+    for ckc_k in $SYS/data/app/*/oat/*/.vd-keep.odex $SYS/data/app/*/oat/*/.vd-new.odex; do
+        [ -f "$ckc_k" ] || continue
+        ckc_o=${ckc_k%/*}; ckc_p=${ckc_o#$SYS/data/app/}; ckc_p=${ckc_p%%/*}; ckc_p=${ckc_p%-*}
+        compile_dex2oat_for "$ckc_p" && continue
+        if [ -f "$ckc_o/.vd-keep.odex" ] && ! { compile_elf_ok "$ckc_o/base.odex" && ! [ "$ckc_o/base.odex" -ef "$ckc_o/.vd-new.odex" ]; }; then
+            compile_keep_put "$ckc_o" odex; compile_keep_put "$ckc_o" art
+            t "compile: ${ckc_o#$SYS/data/app/}: put the previous odex back after an unfinished compile"
+        fi
+        rm -f "$ckc_o"/.vd-keep.* "$ckc_o"/.vd-new.* "$ckc_o"/.vd-tmp.* 2>/dev/null
+    done
+}
+compile_dex2oat_for() { # pkg：有给它编译的 dex2oat / patchoat 在跑
+    for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do
+        tr '\0' '\n' < /proc/$p/cmdline 2>/dev/null | grep -q "/data/app/$1-[0-9]*/" && return 0
+    done
+    return 1
+}
+# 轻量编译（补救用）：没有能用的 odex 时至少回到安装时的状态，也在 babysit 下跑（nice 19、内存保护）。
+# speed 编不完（timeout：单核 + 512 MB 上的微信读书，PW4 模拟器 540 秒没编完）而用过这个应用、有 JIT 记下的热点档案时，
+# 补 speed-profile（只编热点方法，几十秒）而不是 interpret-only：至少常用的路径是编译过的，不是永远解释执行。
+# 补的时候应用起了进程照 compile.nocode_now 的规矩（没有能用代码时不停；COMPILE_RUNNING=0 时停）。用的过滤器放在 $rf。
+compile_light() { # pkg [timeout]
+    rf=interpret-only
+    [ "$2" = timeout ] && [ -s "$SYS/data/misc/profiles/cur/0/$1/primary.prof" ] && rf=speed-profile
+    compile_pm_start "$1" $W/compile.light.out -m $rf -f "$1"
+    compile_babysit $cp_ "$1"; compile_pm_wait
+}
+# 被停掉（到了前台 / 起了进程 / 在用且内存紧）以后 odex 已经没了的应用（compile.restore，compile_one 记）：应用退出了、
+# 条件满足（工作进程挑包时，和别的编译同样的规矩）先补一个 interpret-only，speed 的重排照旧。
+# 在跑 / 在前台的不在这里补：没有能用代码的应用（compile_nocode）队列里的 speed 重编本来就会在用着时接着编，编不完由
+# compile_one 的补救（compile_light）兜底，这里不重复。补了返回 0；没有能补的返回 1。补的时候被停留在单子里下次再补；
+# 已经有 odex（被别的编译编好了）或者应用卸掉了就去掉。
+compile_restore_next() {
+    [ -s $W/compile.restore ] || return 1
+    crn_fg=$(compile_fg); crn_p=
+    for crn_q in $(cat $W/compile.restore); do
+        if ! app_dir "$crn_q" >/dev/null || [ -n "$(odex_filter "$crn_q")" ]; then
+            sed -i "/^$crn_q\$/d" $W/compile.restore; continue
+        fi
+        [ "$crn_q" = "$crn_fg" ] && continue
+        compile_app_running "$crn_q" && continue
+        crn_p=$crn_q; break
+    done
+    [ -n "$crn_p" ] || return 1
+    rm -f $W/compile.abort
+    if compile_nocode "$crn_p"; then : > $W/compile.nocode_now; else rm -f $W/compile.nocode_now; fi
+    crn_s=$(cut -d. -f1 /proc/uptime)
+    crn_t=$(adb_sh "getprop dalvik.vm.dex2oat-threads" 2>/dev/null | tr -d '\r\n')
+    if lowmem_ram || compile_user_active || ! compile_charging; then adb_sh "setprop dalvik.vm.dex2oat-threads 1" >/dev/null 2>&1; fi
+    compile_light "$crn_p"
+    adb_sh "setprop dalvik.vm.dex2oat-threads '$crn_t'" >/dev/null 2>&1
+    crn_f=$(odex_filter "$crn_p"); crn_a=$(cat $W/compile.abort 2>/dev/null)
+    t "compile: $crn_p had no odex after an aborted compile, restored to ${crn_f:-none} ($rf, $(( $(cut -d. -f1 /proc/uptime) - crn_s ))s${crn_a:+, aborted: $crn_a})"
+    [ -n "$crn_f" ] || [ -z "$crn_a" ] && sed -i "/^$crn_p\$/d" $W/compile.restore
+    rm -f $W/compile.abort $W/compile.nocode_now
+    return 0
 }
 compile_one() { # pkg mode force
     pkg=$1; mode=$2
@@ -403,14 +575,16 @@ compile_one() { # pkg mode force
         *) adb_sh "setprop dalvik.vm.dex2oat-flags '$oflags --no-watch-dog'" >/dev/null 2>&1 ;; esac
     s=$(cut -d. -f1 /proc/uptime)
     if compile_nocode "$pkg"; then : > $W/compile.nocode_now; else rm -f $W/compile.nocode_now; fi
-    adb_sh "cmd package compile -m $mode -f $pkg" > $W/compile.out 2>&1 &
-    cp_=$!
+    compile_pm_start "$pkg" $W/compile.out -m $mode -f $pkg
     compile_babysit $cp_ "$pkg"
-    wait $cp_; rc=$?
+    compile_pm_wait; rc=$?
     sec=$(( $(cut -d. -f1 /proc/uptime) - s ))
     f=$(odex_filter "$pkg")
     ab=$(cat $W/compile.abort 2>/dev/null)
-    if [ "$ab" = install ]; then r=aborted   # 给安装让路：compile_release 会重新排队，不算失败
+    # 编出来的就是要的过滤器、PackageManager 也说 Success：不管中途有没有想停它（停了个空、dex2oat 自己先编完了），都算编好，
+    # 不再强制重排（Oasis 2 用户日志：busy 停了个空，590 秒后 Success，以前记成 aborted 又从头编一遍）
+    if [ "$f" = "$mode" ] && grep -q Success $W/compile.out; then r=ok
+    elif [ "$ab" = install ]; then r=aborted   # 给安装让路：compile_release 会重新排队，不算失败
     # 到了前台 / 用户在用且内存紧：不算失败，重新排队（前台时跳过，空闲时再编）
     elif [ "$ab" = foreground ] || [ "$ab" = running ] || [ "$ab" = busy ]; then r=aborted
     # 超过 COMPILE_MAX_S 被停：这台机器上这个过滤器编不完（512 MB 机型上微信读书的 speed），同一个安装不再自动试（compile_needed），
@@ -430,20 +604,25 @@ compile_one() { # pkg mode force
     # 至少回到安装时的状态。也在 babysit 下跑（nice 19、内存保护）。
     # speed 编不完（timeout：单核 + 512 MB 上的微信读书，PW4 模拟器 540 秒没编完）而用过这个应用、有 JIT 记下的热点档案时，
     # 补 speed-profile（只编热点方法，几十秒）而不是 interpret-only：至少常用的路径是编译过的，不是永远解释执行。
-    if { [ $r = fail ] || [ $r = timeout ]; } && [ -z "$f" ] && ! compile_held && { [ -n "$nocode" ] || ! compile_app_running "$pkg"; }; then
-        rf=interpret-only
-        [ $r = timeout ] && [ -s "$SYS/data/misc/profiles/cur/0/$pkg/primary.prof" ] && rf=speed-profile
-        adb_sh "cmd package compile -m $rf -f $pkg" >/dev/null 2>&1 &
-        compile_babysit $! "$pkg"   # 补的时候应用起了进程也停（它拿到的也是没写完的 odex）
+    # 原来的 odex 编译期间一直保着（compile_keep_*），失败后它还在：只有一个 odex 也没有时才补；超时而有档案、现在又不是
+    # speed-profile 的，照旧马上补 speed-profile
+    if { [ $r = fail ] || [ $r = timeout ]; } && ! compile_held && { [ -n "$nocode" ] || ! compile_app_running "$pkg"; } &&
+       { [ -z "$f" ] || { [ $r = timeout ] && [ "$f" != speed-profile ] && [ -s "$SYS/data/misc/profiles/cur/0/$pkg/primary.prof" ]; }; }; then
+        compile_light "$pkg" $r   # 补的时候应用起了进程也停（它拿到的也是没写完的 odex），没有能用代码时不停
         t "compile: $pkg restored to $(odex_filter "$pkg") ($rf)"
     fi
+    # 被停掉（到了前台 / 起了进程 / 在用且内存紧）时 installd 也已经把原来的 odex 截掉了：应用比编之前还慢
+    # （filter=none，从 apk 解释执行；Oasis 2 用户日志里微信读书就是这样）。记进 compile.restore（compile_restore_next）
+    case "$ab" in foreground|running|busy)
+        [ $r = aborted ] && [ -z "$f" ] && { grep -qx "$pkg" $W/compile.restore 2>/dev/null || echo "$pkg" >> $W/compile.restore; } ;;
+    esac
     [ -n "$thr" ] && adb_sh "setprop dalvik.vm.dex2oat-threads '$othr'" >/dev/null 2>&1
     [ $r = ok ] && rm -f $W/compile.nocode.$pkg
     t "compile: $pkg -m $mode -> $r$( [ -f $W/compile.nocode_now ] && echo " (had no usable code: compiled while in use)") (filter=${f:-none}, ${sec}s, rc=$rc$( [ -f $W/compile.abort ] && echo ", aborted: $(cat $W/compile.abort)"): $(tr '\n' ' ' < $W/compile.out | cut -c1-120))"
     # 记录最多 200 行
     { tail -n 199 $CLOG 2>/dev/null; echo "$pkg $dir $r $mode ${sec}s $(date +%Y%m%d-%H%M%S)"; } > $CLOG.tmp 2>/dev/null && mv -f $CLOG.tmp $CLOG
     echo "$pkg $r $sec" > $W/compile.last
-    case "$ab" in
+    [ $r = ok ] || case "$ab" in
         foreground|running|busy)
             sed -i "/^$pkg\( \|\$\)/d" $CQ 2>/dev/null; echo "$pkg force" >> $CQ
             echo $(( $(cat $W/compile.total 2>/dev/null || echo 0) + 1 )) > $W/compile.total
@@ -464,6 +643,7 @@ compile_nap() { # 秒
 }
 compile_worker() {
     trap 'rm -f $W/compile.pid; rm -rf $W/compile.lock' EXIT
+    compile_keep_cleanup
     idx=$(cat $W/compile.index 2>/dev/null || echo 0); gaveup=
     while [ -s $CQ ]; do
         # 容器没了就结束（stop.sh 也会按 pid 杀掉本进程）
@@ -481,23 +661,6 @@ compile_worker() {
         if [ -f $W/compile.needidle ] && compile_user_active; then
             compile_status state=waiting reason=你在用机器，等空闲时再优化 code=busy "index=$idx" "total=$tot" "last=$last" "msg=你在用机器，等空闲时再优化"; compile_nap 30 || break; continue
         fi
-        if ! compile_mem_ok; then
-            if compile_user_active; then
-                # 用户在用：一直等（不算进下面的放弃计时），他不用了门槛就降下来
-                compile_status state=waiting reason=你在用机器、内存不多，等空闲时再优化 code=busy "index=$idx" "total=$tot" "last=$last" "msg=你在用机器、内存不多，等空闲时再优化"
-                compile_nap 30 || break; continue
-            fi
-            compile_status state=waiting reason=memory "index=$idx" "total=$tot" "last=$last"
-            n=$(( $(cat $W/compile.memwait 2>/dev/null || echo 0) + 1 )); echo $n > $W/compile.memwait
-            # 空闲了 10 分钟内存还是不够：工作进程先停，队列留着，30 分钟后看门狗（compile_watch）再起
-            if [ $n -ge 20 ]; then
-                t "compile: not enough free memory for 10 min ($(mem_avail_mb) MB), retrying in 30 min"
-                rm -f $W/compile.memwait; echo $(( $(cut -d. -f1 /proc/uptime) + 1800 )) > $W/compile.retry_at
-                compile_status state=paused reason=memory "index=$idx" "total=$tot" "last=$last"; gaveup=1; break
-            fi
-            compile_nap 30 || break; continue
-        fi
-        rm -f $W/compile.memwait
         # 桌面 / 输入法的 speed 编译（afterboot.sh 的 home_aot）在跑：一次只编一个，等它做完
         if alive $W/aot.pid; then compile_status state=waiting reason=正在优化桌面，稍后继续 code=busy "index=$idx" "total=$(cat $W/compile.total 2>/dev/null)" "last=$last" "msg=正在优化桌面，稍后继续"; compile_nap 5 || break; continue; fi
         # 取队列里第一个不在前台、也没有进程在跑的包；前台 / 在跑的留在队列里，等它离开前台、退出
@@ -522,6 +685,30 @@ compile_worker() {
             compile_status state=waiting reason=等你不用这个应用时再优化 code=foreground "pkg=$fg" "index=$idx" "total=$tot" "last=$last" "msg=等你不用这个应用时再优化"
             compile_nap 10 || break; continue
         fi
+        # 内存放到挑好包以后再查：要编的应用自己常驻在后台（微信读书）时，以前先查内存、永远不够，走不到上面的
+        # “请 Android 结束它”，一整天“not enough free memory … retrying in 30 min”。现在在跑的包先走上面的 am kill，
+        # 它退了内存自然够了；挑出来的包本身没在跑时才按内存等。
+        if ! compile_mem_ok; then
+            if compile_user_active; then
+                # 用户在用：一直等（不算进下面的放弃计时），他不用了门槛就降下来
+                compile_status state=waiting reason=你在用机器、内存不多，等空闲时再优化 code=busy "index=$idx" "total=$tot" "last=$last" "msg=你在用机器、内存不多，等空闲时再优化"
+                compile_nap 30 || break; continue
+            fi
+            compile_status state=waiting reason=memory "index=$idx" "total=$tot" "last=$last"
+            # 排在前面、还在后台跑的待编应用（crun）占着内存：按同样的规矩请 Android 结束它们；在等它们的时候不算放弃计时
+            if [ -n "$crun" ]; then compile_bg_kill $crun; compile_nap 30 || break; continue; fi
+            n=$(( $(cat $W/compile.memwait 2>/dev/null || echo 0) + 1 )); echo $n > $W/compile.memwait
+            # 空闲了 10 分钟内存还是不够：工作进程先停，队列留着，30 分钟后看门狗（compile_watch）再起
+            if [ $n -ge 20 ]; then
+                t "compile: not enough free memory for 10 min ($(mem_avail_mb) MB), retrying in 30 min"
+                rm -f $W/compile.memwait; echo $(( $(cut -d. -f1 /proc/uptime) + 1800 )) > $W/compile.retry_at
+                compile_status state=paused reason=memory "index=$idx" "total=$tot" "last=$last"; gaveup=1; break
+            fi
+            compile_nap 30 || break; continue
+        fi
+        rm -f $W/compile.memwait
+        # 上次被停掉、odex 已经没了的应用（compile.restore）：它退出了就先补一个 interpret-only，再接着排队编 speed
+        compile_restore_next && continue
         set -- $line; pkg=$1; force=$2
         sed -i "/^$pkg\( \|\$\)/d" $CQ
         compile_needed "$pkg" "$force" || continue

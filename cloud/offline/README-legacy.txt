@@ -4,8 +4,8 @@ VeraDroid 老机型离线整包（实验机型，只在模拟器里验证过）�
 安装前请先用 USB 把重要的书拷到电脑。
 
 1. 把这 3 个文件（VeraDroid-Offline.sh、bootstrap.sh、veradroid-legacy-….tar.gz）全部放进 Kindle 的 documents 文件夹。
-2. 拔掉 USB，在书库里点“VeraDroid 离线安装”：屏幕上会显示说明。
-3. 看完说明，10 秒后、2 分钟内再点一次“VeraDroid 离线安装”才会开始安装。
+2. 拔掉 USB，在书库里点“VeraDroid 安装（离线）”：屏幕上会显示说明。
+3. 看完说明，10 秒后、2 分钟内再点一次“VeraDroid 安装（离线）”才会开始安装。
 4. 装好后书库里会多出“VeraDroid 启动”“VeraDroid 上传测试结果”。卸载：Android 里 设置 → 设备与更新 → 卸载 VeraDroid；
    Android 起不来时把 veradroid/VeraDroid-Uninstall.sh 拷进 documents，在书库里点它（点两次）。
 测试方法和怎么反馈见 https://veradroid.wenjin.jp 上的测试说明；结果在 USB 里的 veradroid/TEST-RESULT.txt。

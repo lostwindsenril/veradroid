@@ -37,13 +37,21 @@ if [ "$1" = "--in-chroot" ]; then HOSTNS=1 run_in_ns "$2" "$3" "$4"; exit 1; fi
 
 # 日志只留最近约 512 KB：以前从不清理，低内存机型上看门狗每 20 秒还写一行
 [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ] && { tail -c 524288 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"; }
-exec >>$LOG 2>&1
+# 日志写不进去（系统盘只读 / 挂载点不可写）时 exec 重定向失败会让整个脚本当场退出、什么都不留：先试，不行就写 tmpfs
+if : >>"$LOG" 2>/dev/null; then exec >>$LOG 2>&1
+else vd_slog "cannot write $LOG (system image read-only or missing?): logging to /tmp/veradroid-start.log"; exec >>/tmp/veradroid-start.log 2>&1; fi
 # 脱离启动环境：新会话、干净环境、oom 调成 0，不被书库启动器的进程组牵连
 if [ -z "$VERADROID_DETACHED" ]; then
     echo 0 > /proc/$$/oom_score_adj 2>/dev/null
-    exec env -i VERADROID_DETACHED=1 PATH="$PATH" setsid sh "$0" "$@" </dev/null
+    vd_slog "start requested (${1:-$SYSTEM_APP}), pid $$, image $(grep -q " $SYS " /proc/mounts && echo mounted || echo NOT-mounted)"
+    # 没有 setsid / env 时 exec 失败，sh 当场退出、没有任何提示：先看在不在，不在就不脱离，原地接着启动
+    if command -v setsid >/dev/null 2>&1 && command -v env >/dev/null 2>&1; then
+        exec env -i VERADROID_DETACHED=1 PATH="$PATH" setsid sh "$0" "$@" </dev/null
+    fi
+    vd_slog "no setsid/env on this firmware: starting without detaching"
+    VERADROID_DETACHED=1
 fi
-echo "== $(date) start app=${1:-$SYSTEM_APP}"
+echo "== $(date) start app=${1:-$SYSTEM_APP} up=$(cut -d' ' -f1 /proc/uptime)"
 APP=${1:-$SYSTEM_APP}
 
 # Kindle 正在关机 / 重启（/etc/upstart/shutdown.conf 第一步写 /tmp/shutdown_in_progress）：这时不能再启动——会把系统盘重新挂到
@@ -58,7 +66,7 @@ kindle_shutting_down() {
 }
 if kindle_shutting_down; then
     t "kindle is shutting down (/tmp/shutdown_in_progress): not starting"
-    splash "Kindle 正在关机 / 重启，VeraDroid 不启动" 36 || eips 1 2 "Kindle is shutting down: VeraDroid not started" >/dev/null 2>&1
+    vd_notice "Kindle 正在关机 / 重启，VeraDroid 不启动" "Kindle is shutting down: VeraDroid not started" 5
     exit 0
 fi
 
@@ -87,7 +95,7 @@ if [ -z "$VD_INSTWAITED" ] && installer_busy; then
     while installer_busy && [ $i -lt 360 ]; do sleep 5; i=$((i + 1)); done
     if installer_busy; then
         t "installer still running after $((i * 5))s: not starting"
-        splash "VeraDroid 更新还没装完，请稍后再点“VeraDroid 启动”" 36 || eips 1 2 "VeraDroid: update still installing, try again later" >/dev/null 2>&1
+        vd_notice "VeraDroid 更新还没装完，请稍后再点“VeraDroid 启动”" "VeraDroid: update still installing, try again later"
         exit 1
     fi
     t "installer finished after $((i * 5))s, starting"
@@ -114,6 +122,16 @@ installer_leftovers() {
     done
 }
 installer_leftovers 2>/dev/null
+# 安装器被硬杀（SIGKILL）时它恢复防休眠的 EXIT 陷阱没跑：preventScreenSaver 一直是 1，电源键再也进不了屏保（社区报告，模拟器复现）。
+# 安装器动它之前把原值记在 state/keepawake.orig、正常结束时删掉。这里还看到它、又没有活着的安装器（上面已经等过 / 清过锁），就放回原值。
+keepawake_heal() {
+    kh_f=/mnt/base-us/veradroid/state/keepawake.orig
+    [ -f $kh_f ] || return 0
+    [ -d /mnt/base-us/veradroid/state/install.lock ] && return 0
+    kh_v=$(cat $kh_f 2>/dev/null); case "$kh_v" in 0|1) ;; *) kh_v=0 ;; esac
+    lipc-set-prop com.lab126.powerd preventScreenSaver "$kh_v" >/dev/null 2>&1 && rm -f $kh_f && t "restored preventScreenSaver=$kh_v left by an installer that was killed"
+}
+keepawake_heal 2>/dev/null
 
 # 把输出接回系统盘上的日志（之前为了让 stop.sh 能卸载系统盘挪到了 /tmp）。系统盘没挂上时不接：exec 重定向失败会让整个脚本退出，
 # 也不要在镜像下面的裸目录里建一个日志文件。
@@ -124,6 +142,10 @@ start_helpers() {
     kill $(cat $W/cmd.pid 2>/dev/null) 2>/dev/null   # 上次留下的命令监听（冻结期间还活着）
     watchdog &
     echo $! > $W/watchdog.pid
+    # 解冻：上一轮的看守（冻结后它自己会退）。它退了以后 pid 号可能已经给了别的进程：只结束命令行还是 veradroid.sh 的
+    gp=$(cat $W/guard.pid 2>/dev/null); [ -n "$gp" ] && grep -q "boot/veradroid.sh" /proc/$gp/cmdline 2>/dev/null && kill "$gp" 2>/dev/null
+    wd_guard &                                         # 看门狗的看守（watchdog.sh）
+    echo $! > $W/guard.pid
     sleep_watch &
     echo $! > $W/sleep.pid
     type usb_watch_start >/dev/null 2>&1 && usb_watch_start   # 插 USB 线时问要不要切到 USB 传输（usb.sh）
@@ -149,7 +171,8 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         # 解冻也只允许一个流程：冻结时连点两次“启动”，以前会起两套看门狗 / 休眠监视，还可能把 core_pattern 的原值盖掉
         if ! mkdir $W/thawing 2>/dev/null; then
             op=$(cat $W/thawing/pid 2>/dev/null)
-            if [ -n "$op" ] && kill -0 "$op" 2>/dev/null; then t "already thawing (pid $op), ignored"; exit 0; fi
+            if vd_lock_alive "$op"; then t "already thawing (pid $op), ignored"; framework_paused || vd_notice "VeraDroid 正在恢复，请稍候" "VeraDroid is resuming, please wait" 5; exit 0; fi
+            t "stale thaw lock (pid ${op:-?}), taking over"
         fi
         echo $$ > $W/thawing/pid
         trap 'rm -f $W/thawing/pid; rmdir $W/thawing 2>/dev/null' EXIT
@@ -181,6 +204,7 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         t "restart after inconsistent state: stopped, starting again"
     else
     open_app
+    vd_slog "android already running (pid $P): opened $APP"
     exit 0
     fi
 fi
@@ -200,7 +224,7 @@ if [ -f /mnt/base-us/veradroid/state/install.incomplete ] && [ -z "$VD_RECOVERED
         VD_RECOVERED=1 exec sh "$VD/boot/veradroid.sh" "$@"
     fi
     t "interrupted install ${st:-?}: cannot roll back, run the installer again"
-    splash "VeraDroid：上次安装没有完成，请重新运行安装脚本" 36; sleep 5; exit 1
+    vd_notice "VeraDroid：上次安装没有完成，请重新运行安装脚本" "VeraDroid: the last install did not finish, run the installer again"; exit 1
 fi
 # 离线更新文件夹（localupdate.sh，docs/host-settings.md）：veradroid/update/ 里放了比现在新的安装包就先校验、安装，
 # 装好后用新版本的脚本接着启动。只看文件名的检查很快；没有包时什么都不做。装过一次（成功或失败）的包会被删掉 / 改名，不会每次重试。
@@ -213,7 +237,7 @@ if [ -z "$VD_LOCALUPD" ] && ls "$VD"/update/veradroid-*-*.tar.gz "$VD"/update/Ve
 fi
 if ! mkdir $W/starting 2>/dev/null; then
     op=$(cat $W/starting/pid 2>/dev/null)
-    if [ -n "$op" ] && kill -0 "$op" 2>/dev/null; then t "already starting (pid $op), ignored"; eips 1 2 "VeraDroid is starting, please wait..." >/dev/null 2>&1; exit 0; fi
+    if vd_lock_alive "$op"; then t "already starting (pid $op), ignored"; framework_paused || vd_notice "VeraDroid 正在启动，请稍候" "VeraDroid is starting, please wait" 5; exit 0; fi
     t "stale start lock (pid ${op:-?}), taking over"
 fi
 echo $$ > $W/starting/pid
@@ -230,13 +254,13 @@ done
 [ $i -gt 0 ] && { ws=$i; storage_mount; log_reopen; t "previous stop.sh finished after ${ws}s, starting"; }   # storage_mount 自己也用 i
 sh $VD/boot/stop.sh --stale >/dev/null 2>&1
 rm -f $SYS/settings.app $W/appprof.pkg      # 上次运行时某个应用的显示参数：冷启动从桌面开始
-storage_mount || { splash "VeraDroid：系统盘还在被上次的进程占用，请过一分钟再试" 36; sleep 5; exit 1; }
+storage_mount || { vd_notice "VeraDroid：系统盘还被上次运行占用，没能启动。请长按电源键重启 Kindle 后再试" "VeraDroid: the system image is still in use by the last run. Restart the Kindle (hold power), then try again"; exit 1; }
 kmod_load
-[ -d $R ] && [ -e $R/init -o -f $R/.demo ] || { t "no system image at $R"; splash "VeraDroid：还没有安装系统" 40; sleep 5; exit 1; }
+[ -d $R ] && [ -e $R/init -o -f $R/.demo ] || { t "no system image at $R"; vd_notice "VeraDroid：找不到系统文件，请重新运行安装脚本" "VeraDroid: system files missing, run the installer again"; exit 1; }
 # 只在模拟器上验证过的机型：独立的看护进程（开机超时 / 启动脚本中途死掉时自己回到 Kindle）+ 开机后自检（tester.sh）
 test_begin
 FRAMEWORK_AFTER_SAVE='splash_begin 正在准备 3'
-framework_stop || { t "cannot pause kindle ui"; exit 1; }
+framework_stop || { t "cannot pause kindle ui"; vd_notice "VeraDroid：没能暂停 Kindle 界面，没有启动" "VeraDroid: could not pause the Kindle UI, not started"; exit 1; }
 splash_update 12
 splash_after_stop &
 [ -x "$FBINK" ] || { t "no fbink; continuing with framebuffer/eips fallback"; FBINK=; }
@@ -250,7 +274,7 @@ type appprof_publish >/dev/null 2>&1 && appprof_publish   # 每个应用的显�
 type appprof_density_boot >/dev/null 2>&1 && appprof_density_boot
 touch_setup
 # 找不到触摸屏就不要继续：Android 起来也操作不了，而 Kindle 界面已经停了。恢复 Kindle 界面后退出。
-input_start || { t "no usable touch screen: stopping"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; exit 1; }
+input_start || { t "no usable touch screen: stopping"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; vd_notice "VeraDroid：找不到触摸屏，没有启动" "VeraDroid: no usable touch screen, not started"; exit 1; }
 echo "androidboot.hardware=kindle androidboot.zygote=zygote32" > $W/cmdline
 # 没有 net 命名空间：系统和 Kindle 共用网络，让 netd / 以太网服务进 hostnet 模式（只读、不改 Kindle 的网络）
 hostns && echo "androidboot.hardware=kindle androidboot.zygote=zygote32 androidboot.vdhostnet=1" > $W/cmdline
@@ -259,9 +283,10 @@ hostns && echo "androidboot.hardware=kindle androidboot.zygote=zygote32 androidb
 tz_prepare
 zram_on
 slim_apply
+su_hide
 readahead_on
 net_setup
-container_start || { log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; exit 1; }
+container_start || { log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; vd_notice "VeraDroid：系统没能启动（容器起不来），已回到 Kindle" "VeraDroid: Android could not be started, back to Kindle"; exit 1; }
 bat_baseline       # 电量统计起点（energy.sh）
 net_start
 echo "$APP" > $X/ctl/app
@@ -279,5 +304,6 @@ start_helpers
 after_boot &
 echo $! > $W/afterboot.pid    # legacy：stop.sh 要能停掉它（见 stop.sh）
 t "started"
+vd_slog "started (container up, android booting)"
 exit 0
 }

@@ -1172,7 +1172,7 @@ final class BlocksHome {
         devBox.addView(dev);
         devBox.addView(Blocks.hair(a));
         LinearLayout r1 = new LinearLayout(a);
-        Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        Map<String, String> st = HostLink.status(a);
         String[][] cells = { { (st.get("battery") == null ? "—" : st.get("battery")) + "%", "剩余电量", "Battery" },
             { storageUsed() + "%", "存储已用", "Storage" }, { version(), "桌面版本", "Version" } };
         for (int i = 0; i < 3; i++) {
@@ -1280,7 +1280,7 @@ final class BlocksHome {
     /** 电量每次进“我的”都可能变：只改那一格的字。 */
     private void refreshMe() {
         if (meBattery == null) return;
-        Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        Map<String, String> st = HostLink.status(a);
         String s = (st.get("battery") == null ? "—" : st.get("battery")) + "%";
         if (!s.contentEquals(meBattery.getText())) meBattery.setText(s);
     }

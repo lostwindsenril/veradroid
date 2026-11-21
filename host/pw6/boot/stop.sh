@@ -17,7 +17,7 @@ STALE=; [ "$1" = "--stale" ] && STALE=1
 # 干净时也不卸下系统盘：common.sh 刚挂上，卸下来 veradroid.sh 马上又要再挂一次（再跑一次 e2fsck）。
 # 完整停止以后 $W 里还留着的（PW6 模拟器 1.02 实测；k49 多两个它自己的）：常驻的自动更新和它的 pid、上次的日志、
 # 画面 / 预编译的状态、设置的副本。下面的完整流程不碰它们（input.log 除外：只是删掉一个日志，触摸前端下次启动时重写）
-STALE_KEEP="alarmfix appprof.pkg auto-update.sh autoupdate.pid bat.logt bat.start bw.released compile.dexmb.* compile.last compile.out docs.before docs.missing gestures idle.net inject input.log memfg.cur poem shutw.log splash.cells splash.last splash.t0 splash.txt stop-shutdown.sh tz.android uiderr.lines"
+STALE_KEEP="alarmfix lmk.state appprof.pkg auto-update.sh autoupdate.pid bat.logt bat.start bw.released compile.dexmb.* compile.last compile.out docs.before docs.missing gestures idle.net inject input.log memfg.cur poem shutw.log splash.cells splash.last splash.t0 splash.txt stop-shutdown.sh tz.android uiderr.lines"
 stale_clean() {
     sc_p=$(cat "${VD_STOP_PIDF:-/tmp/veradroid-stop.pid}" 2>/dev/null); [ -n "$sc_p" ] && kill -0 "$sc_p" 2>/dev/null && return 1
     for sc_f in $(ls -A $W 2>/dev/null); do
@@ -126,7 +126,7 @@ freezer_cleanup
 kmsg "container mounts released"
 # 多看在前台时换过的显示密度会存进 Android 的设置文件：容器已经没了，趁系统盘还挂着把它抹掉（appprof.sh；下次开机前还会再抹一次）
 [ -f "$VD/boot/lib/appprof.sh" ] && . "$VD/boot/lib/appprof.sh" && appprof_density_scrub >> $LOG 2>&1
-[ -n "$STALE" ] && { loopdio_restore 2>/dev/null || true; rm -rf $W/kfb; storage_umount; exit 0; }
+[ -n "$STALE" ] && { loopdio_restore 2>/dev/null || true; lmk_kernel_restore 2>/dev/null || true; rm -rf $W/kfb; storage_umount; exit 0; }
 loopdio_restore 2>/dev/null || true
 readahead_restore 2>/dev/null || true
 zram_restore

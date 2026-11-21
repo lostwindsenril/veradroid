@@ -155,6 +155,7 @@ final class SysUpdate {
     /** “检查系统更新”：查完再弹对话框（有新版本：更新内容 + 更新 / 以后再说；没有：说一声）。 */
     static void check(final Activity a) {
         if (busy) { VeraToast.show(a, "正在检查更新…"); return; }
+        if (running()) { progress(a, null); return; }   // 已经在更新：不再查一遍、不再开第二个安装器，直接看进度
         busy = true;
         VeraToast.show(a, "正在检查系统更新…");
         new Thread(new Runnable() { @Override public void run() {
@@ -241,8 +242,29 @@ final class SysUpdate {
             } })
             .positive("更新", new Runnable() { @Override public void run() {
                 HostLink.cmd("fullupdate");
-                VeraToast.show(a, "开始更新到 " + i.latest + "，几秒后会退出 Android");
+                progress(a, i.latest);
             } }).show();
+    }
+
+    /** 系统更新正在进行（宿主的 ctl/update.status 一小时内有进展）。 */
+    static boolean running() {
+        Map<String, String> m = TaskCards.read(TaskCards.UPDATE);
+        return TaskCards.active(m.get("state")) && TaskCards.now() - TaskCards.num(m, "time", 0) < 3600;
+    }
+
+    /**
+     * 点了“更新”以后马上给看得见的进度（用户诊断，KT6：以前只弹一句“几秒后会退出”，可安装器要先在后台
+     * 下载、核对，慢网下二三十分钟 Android 都不退出，看上去就是“点了更新一直没反应”，有人就去重装了）。
+     * 对话框里放的就是“设备与关于”页那张进度卡片（跟着 ctl/update.status 走，出错时写明代码和原因）。
+     */
+    static void progress(final Activity a, String latest) {
+        if (a.isFinishing()) return;
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(text(a, (latest == null ? "系统更新" : "更新到 " + latest) + "：先在后台下载和核对（网速慢时要十几分钟，这期间可以照常用），"
+            + "都好了才退出 Android 安装，装完自动回来。关掉这个窗口不影响更新，进度也可以在 设置 → 设备与关于 里看。", 15, false, 0));
+        box.addView(new TaskCards.Update(a, false), new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        new VeraDialog.Builder(a).title("正在更新").view(box).positive("在后台继续", null).show();
     }
 
     private static TextView text(Activity a, String s, float sp, boolean bold, int topDp) {

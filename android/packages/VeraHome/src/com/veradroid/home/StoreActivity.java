@@ -436,19 +436,28 @@ public class StoreActivity extends Activity {
         List<String> cands = Dl.candidates(a.download, q, mirrors);
         Exception last = null;
         long before = Dl.have(out); int fails = 0;
-        final long t0 = System.currentTimeMillis(); final long have0 = before;
-        Dl.Progress p = new Dl.Progress() { @Override public void on(long done, long total, boolean mirror) {
-            long pct = total > 0 ? done * 100 / total : -1;
-            long sec = Math.max(1, (System.currentTimeMillis() - t0) / 1000);
-            long kbs = Math.max(0, (done - have0) / 1024 / sec);
-            if (pct >= 0) say("正在下载 " + a.name + " … " + pct + "%（" + (done >> 20) + " / " + (total >> 20) + " MB，"
-                + (kbs >= 1024 ? String.format("%.1f MB/s", kbs / 1024.0) : kbs + " KB/s") + (mirror ? "，镜像" : "") + "）");
-        }};
+        final java.util.Set<String> slow = new java.util.HashSet<String>();   // sources that crawled: the next try skips them
+        // 速度看最近十来秒（以前从开始算平均：换了快的源以后还一直显示很慢）；大小用 StoreNet.mb（以前 4 MB 的应用一直显示 0 / 4 MB）
+        Dl.Progress p = new Dl.Progress() {
+            long wt = System.currentTimeMillis(), wd = -1, kbs = -1;
+            @Override public void on(long done, long total, boolean mirror) {
+                long now = System.currentTimeMillis();
+                if (wd < 0 || done < wd) { wd = done; wt = now; }
+                else if (now - wt >= 3000) { kbs = (done - wd) * 1000 / (now - wt) / 1024; if (now - wt >= 10000) { wd = done; wt = now; } }
+                long pct = total > 0 ? done * 100 / total : -1;
+                if (pct >= 0) say("正在下载 " + a.name + " … " + pct + "%（" + StoreNet.mb(done) + " / " + StoreNet.mb(total)
+                    + (kbs < 0 ? "" : "，" + (kbs >= 1024 ? String.format("%.1f MB/s", kbs / 1024.0) : kbs + " KB/s")) + (mirror ? "，镜像" : "") + "）");
+            }};
         while (fails < 8) {
             if (a.size > 0 && out.isFile() && out.length() == a.size && !new File(out.getPath() + ".seg").exists()) return;
             try {
-                Dl.fetchOnce(cands, out, a.size, p);
+                Dl.fetchOnce(cands, out, a.size, p, slow);
                 if (a.size <= 0 || out.length() == a.size) return;
+            } catch (Dl.Slow e) {
+                // 这个源太慢（国内晚上直连镜像常见）：换下一个源，从已经下好的地方接着下，不算失败、不等
+                say("下载太慢（" + (e.bps >> 10) + " KB/s），换一个下载源继续…");
+                before = Dl.have(out);
+                continue;
             } catch (Dl.HttpError e) {
                 if (e.code == 404 || e.code == 403) throw e;   // 商店里没有了 / 没权限：重试也没用
                 last = e;

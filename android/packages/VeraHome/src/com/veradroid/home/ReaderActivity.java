@@ -401,6 +401,7 @@ public class ReaderActivity extends Activity {
                     ui.post(new Runnable() { @Override public void run() {
                         if (isDestroyed()) return;
                         preChapters = chs;
+                        provBookReady();
                         if (tc != null) { toc.clear(); toc.addAll(tc); tocEntries = null; }
                     } });
                     final List<Page> pg = new ArrayList<Page>();
@@ -486,22 +487,56 @@ public class ReaderActivity extends Activity {
         turned();
         if (isPdf) {
             if (page > 0) { page--; readPages++; showPdf(page); }
+        } else if (pages.isEmpty() && provChapter != null) {
+            provPrev();
         } else if (page > 0) { page--; readPages++; showText(); }
+    }
+
+    /**
+     * 整本还没分完页时往回翻（以前这里什么也不做：大书打开后十几秒到几十秒里点左边没反应）。
+     * 本章里有上一页：按整本分页的切法从章首排到这一页，取前一页；在章首：整本已读进来就翻到上一章最后一页，
+     * 还没读进来就记下这一下，读进来马上翻（provPending）。
+     */
+    private void provPrev() {
+        final Geometry g = geometry();
+        ReaderTurn.Cut cut = new ReaderTurn.Cut() { @Override public int end(String s, int from) { return pageEnd(s, from, g); } };
+        int s = ReaderTurn.prevStart(provChapter.text, provStart, cut);
+        if (s >= 0) { showProv(provChapter, provIndex, s); return; }
+        if (provIndex <= 0) return;                          // 全书第一页
+        if (preChapters != null && provIndex - 1 < preChapters.size()) {
+            Chapter c = preChapters.get(provIndex - 1);
+            showProv(c, provIndex - 1, Math.max(0, ReaderTurn.prevStart(c.text, Integer.MAX_VALUE, cut)));
+            return;
+        }
+        waitForBook(-1);
+    }
+
+    /** 整本还没读进来、这一下要跨章：记下方向，读进来（load 里设 preChapters）时补上，并提示一句。 */
+    private int provPending;
+    private void waitForBook(int dir) {
+        provPending = dir;
+        VeraToast.show(this, "还在读这本书，读好就翻");
+    }
+    /** load 读完整本（preChapters 设好）后调：补上等着的那一下翻页。 */
+    private void provBookReady() {
+        int d = provPending;
+        provPending = 0;
+        if (d == 0 || !pages.isEmpty() || provChapter == null) return;
+        if (d > 0) next(); else prev();
     }
 
     private void next() {
         turned();
         if (isPdf) {
             if (page < pdfPages - 1) { page++; readPages++; showPdf(page); }
-        } else if (pages.isEmpty() && provChapter != null && preChapters != null && skipBreaks(provChapter.text, provEnd) >= provChapter.text.length()
-                && provIndex >= 0 && provIndex + 1 < preChapters.size()) {
-            // 还没分完页、这一章翻完了：整本已经读进来，接着排下一章的第一页
-            showProv(preChapters.get(provIndex + 1), provIndex + 1, 0);
-        } else if (pages.isEmpty() && provChapter != null && provEnd < provChapter.text.length()) {
+        } else if (pages.isEmpty() && provChapter != null && !ReaderTurn.chapterHasMore(provChapter.text, provEnd)) {
+            // 还没分完页、这一章翻完了：整本已经读进来就接着排下一章的第一页；还没读进来就等它（以前这里什么也不做：章末点了没反应）
+            if (preChapters == null) waitForBook(1);
+            else if (provIndex >= 0 && provIndex + 1 < preChapters.size()) showProv(preChapters.get(provIndex + 1), provIndex + 1, 0);
+        } else if (pages.isEmpty() && provChapter != null) {
             // 整本还没分完页：从这一页的末尾接着排下一页（页码等分完再显示）
             Geometry g = geometry();
             int start = skipBreaks(provChapter.text, provEnd);
-            if (start >= provChapter.text.length()) return;
             provStart = start; provEnd = pageEnd(provChapter.text, start, g);
             readPages++;
             setPageText(styled(provChapter.text, provStart, provEnd), provChapter.text, provStart, provEnd);
@@ -692,8 +727,17 @@ public class ReaderActivity extends Activity {
         turnsSinceJump = 0;
     }
 
+    /**
+     * 显示桥的“按页数全刷”（KFB_FLASH，设置里的“全刷周期”）：宿主按前台的包开关数页（appprof.sh：桌面 com.veradroid.home
+     * 在前台时发 FLIPCOUNT 0，桌面换页不算翻书）。阅读器也在桌面这个包里，所以以前在自带阅读器里翻多少页都不全刷，
+     * 深色 / 反色页面上残影越积越重（2026-11-21 用户反馈；测试机的 epd 日志每次翻页都是“flip not counted (FLIPCOUNT 0)”）。
+     * 阅读器在前台时自己打开数页：进来时、每翻一页（宿主切回桌面时那条 FLIPCOUNT 0 可能晚到）；离开时关掉。
+     */
+    private void flipCount(boolean on) { HostLink.epd(on ? "FLIPCOUNT 1" : "FLIPCOUNT 0"); }
+
     /** 每翻一页调一次：跳转后读了 BACK_KEEP_TURNS 页，“返回”就收起。 */
     private void turned() {
+        flipCount(true);
         if (backStack.isEmpty()) return;
         if (++turnsSinceJump >= BACK_KEEP_TURNS) { backStack.clear(); paintBackChip(); }
     }
@@ -1067,10 +1111,7 @@ public class ReaderActivity extends Activity {
     }
 
     /** 跳过页首的空行（每页都不以空行开头）。 */
-    private static int skipBreaks(String s, int i) {
-        while (i < s.length() && (s.charAt(i) == '\n' || s.charAt(i) == '\r')) i++;
-        return i;
-    }
+    private static int skipBreaks(String s, int i) { return ReaderTurn.skipBreaks(s, i); }
 
     /**
      * 从 i 开始一页放得下的文字到哪里为止：用和正文 TextView 相同的画笔、宽度、行距排一遍，取放得下的整行。
@@ -1420,6 +1461,7 @@ public class ReaderActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        flipCount(true);
         readStarted = SystemClock.elapsedRealtime();
         readPages = 0;
         resumedNow = true;
@@ -1429,6 +1471,7 @@ public class ReaderActivity extends Activity {
 
     @Override protected void onPause() {
         resumedNow = false;
+        flipCount(false);
         if (readStarted > 0) {
             Stats.addReading(this, SystemClock.elapsedRealtime() - readStarted, readPages);
             readStarted = 0;
@@ -2027,7 +2070,7 @@ public class ReaderActivity extends Activity {
             if (ch < chapters.size() && chapters.get(ch).title != null) t = chapters.get(ch).title;
         }
         if (!t.contentEquals(blkTitle.getText())) blkTitle.setText(t);
-        java.util.Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        java.util.Map<String, String> st = HostLink.status(this);
         String c = Ui.clock(this) + (st.get("battery") != null ? "   " + st.get("battery") + "%" : "");
         if (!c.contentEquals(blkClock.getText())) blkClock.setText(c);
     }

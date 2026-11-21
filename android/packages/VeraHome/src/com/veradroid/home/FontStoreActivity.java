@@ -461,10 +461,13 @@ public class FontStoreActivity extends Activity {
                 } };
                 Exception last = null;
                 boolean got = false;
+                java.util.Set<String> slow = new java.util.HashSet<String>();   // 太慢的源：下一次跳过它，从断点接着下
                 for (int tries = 0; tries < 6 && !got; tries++) {
                     try {
-                        Dl.fetchOnce(cands, part, it.size, p);
+                        Dl.fetchOnce(cands, part, it.size, p, slow);
                         got = it.size <= 0 || part.length() == it.size;
+                    } catch (Dl.Slow e) {
+                        say("下载太慢，换一个下载源继续…"); tries--; if (slow.size() > 8) break; continue;
                     } catch (Dl.HttpError e) {
                         if (e.code == 404 || e.code == 403) throw new Exception("这个字体已经从商店下架了");
                         last = e;

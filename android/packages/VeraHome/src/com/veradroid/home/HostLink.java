@@ -76,6 +76,26 @@ final class HostLink {
     private static final class Kv { long at, mtime, len; Map<String, String> m; }
     private static final Map<String, Kv> KV_CACHE = new HashMap<String, Kv>();
 
+    /**
+     * ctl/status 加上 Android 自己的电量 / 充电状态（healthd，宿主每分钟让它重读一次，watchdog.sh bat_poke_tick）。
+     * 宿主只在被问时写 status（打开桌面、面板时），桌面一直在前台时文件里的电量会停在几小时前
+     * （PW6 1.03 用户“电量显示不同步”：一台测试机充满 100 % 时桌面顶栏还是 78 %）。读不到 Android 的就照旧用文件里的。
+     */
+    static Map<String, String> status(android.content.Context c) {
+        Map<String, String> st = new HashMap<String, String>(kv(CTL + "status"));
+        try {
+            android.content.Intent b = c.getApplicationContext().registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+            if (b != null && b.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true)) {
+                int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+                if (lv >= 0 && sc > 0) {
+                    st.put("battery", String.valueOf(lv * 100 / sc));
+                    st.put("charging", b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_CHARGING ? "1" : "0");
+                }
+            }
+        } catch (Throwable ignored) { }
+        return st;
+    }
+
     static Map<String, String> kv(String path) {
         boolean hot = path.equals(CTL + "status") || path.equals(KFB + "settings");
         if (!hot) return kv0(path);

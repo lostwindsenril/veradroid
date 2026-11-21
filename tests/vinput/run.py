@@ -164,6 +164,24 @@ PINCH = ['pinch', 'pinch_lift']
 TWO = ['two_tap', 'two_stagger', 'two_stagger_wobble', 'two_long', 'two_back', 'two_light', 'two_warmth']
 
 
+def held_suffix(frames, want, sent, lim_ms):
+    """fix/next-input-tap: the frames held for the gesture decision reach Android as one touch-down at the latest held
+    position, so Android's frames are `want` minus a prefix of frames that were all sent within lim_ms of the touch-down
+    (the hold), possibly with the first frame of the rest being that latest held position"""
+    if frames == want: return True
+    t0 = sent[0][0] if sent else 0
+    held = sum(1 for t, f in sent if f and (t - t0) * 1000 <= lim_ms)
+    for k in range(1, held + 1):
+        if frames == want[k:]: return True
+    # ... and the tap dead zone (TAP_PX) after it: the touch-down at a held position, then the finger from where it left
+    # the zone (a few more frames, also within lim_ms of the touch-down)
+    if frames and frames[0] in want[:held + 1]:
+        i = want.index(frames[0])
+        for j in range(i + 1, held + 1):
+            if frames[1:] == want[j:]: return True
+    return False
+
+
 def read_events(fn, skip_udev):
     if not os.path.exists(fn): return []
     b = open(fn, 'rb').read()
@@ -331,11 +349,71 @@ def early_release_cases(new):
     for _, fingers in r['sent']:
         f = tuple(sorted((x, y) for _, x, y in fingers))
         if not want or want[-1] != f: want.append(f)
-    check(frames == want, f'fast drag: every position reached Android ({len(frames)} frames)')
+    check(held_suffix(frames, want, r['sent'], WINDOW), f'fast drag: every position after the early release reached Android ({len(frames)} of {len(want)} frames)')
     lat, frames, r = down_lat('fast_drag', 'PASS_PX=0\n')
     check(lat is not None and lat >= WINDOW - 2, f'PASS_PX=0: touch-down waits for the window ({lat:.0f} ms)')
     lat, frames, r = down_lat('tap')
     check(lat is not None and lat >= WINDOW - 2, f'tap (no movement): still waits for the window ({lat:.0f} ms)')
+
+def held_compact_cases(new):
+    """fix/next-input-tap (多看 on KT6: tap-to-turn did nothing or went back a page): the frames held for the gesture
+    decision used to be replayed to uinput in one burst (the kernel stamps the write time), so a tap with a few px of
+    jitter reached Android as a move of thousands of px/s. Now: one touch-down at the latest held position (+ the lift
+    when the finger already left); HELD_REPLAY=1 brings the replay back; a quick flick that ends inside the hold is still
+    replayed as a flick."""
+    shim = sys.argv[2]
+    print('== held frames: one touch-down, not a burst (fix/next-input-tap)')
+    jit = [(0, [(0, 800, 700)]), (10, [(0, 803, 701)]), (20, [(0, 806, 703)]), (30, [])]
+    jit_long = [(0, [(0, 800, 700)]), (10, [(0, 803, 701)]), (20, [(0, 806, 703)]), (30, [(0, 807, 703)]), (60, [(0, 808, 704)]), (90, [(0, 808, 704)]), (110, [])]
+    def frames_of(fr, gextra='', proto='B', enc=None):
+        r = run(new, shim, proto, 'tap', frames=fr, gextra=gextra, enc=enc)
+        f = decode_mt(r['touch'])
+        if '-k' not in sys.argv: subprocess.call(['rm', '-rf', r['dir']])
+        return f, r
+    for proto in ['B', 'A', 'ST']:
+        f, r = frames_of(jit, proto=proto)
+        check(f == [((806, 703),), ()], f'{proto} 30 ms tap with 6 px jitter: Android gets down at the last position + up, no moves {f}')
+    f, r = frames_of(jit, enc=EncoderPT())
+    check(f == [((806, 703),), ()], f'pt_mt (KT6) 30 ms jittery tap: down + up {f}')
+    f, r = frames_of(jit_long)
+    check(f[:1] in ([((806, 703),)], [((807, 703),)]) and f[-1] == () and ((800, 700),) not in f and ((803, 701),) not in f,
+          f'110 ms jittery tap (longer than the window): the held part is one touch-down, the jitter after it stays in the tap dead zone {f}')
+    f, r = frames_of(jit, 'HELD_REPLAY=1\n')
+    check(f == [((800, 700),), ((803, 701),), ((806, 703),), ()], f'HELD_REPLAY=1: the old replay {f}')
+    # bottom edge strip (held 60 ms): a quick horizontal flick that ends inside the hold stays a flick
+    flick = [(t, [(0, x, 1660)]) for t, x, y in path(((900, 1660), (700, 1660)), 40, 4)] + [(50, [])]
+    f, r = frames_of(flick)
+    check(len(f) >= 4 and f[0] == ((900, 1660),) and f[-1] == (), f'edge strip flick inside the hold: replayed as a flick ({len(f)} frames)')
+    # a plain tap in the edge strip with jitter: down + up
+    et = [(0, [(0, 600, 1660)]), (15, [(0, 603, 1661)]), (35, [])]
+    f, r = frames_of(et)
+    check(f == [((603, 1661),), ()], f'edge strip jittery tap: down + up {f}')
+    # tap dead zone (TAP_PX, 28 px on this 1272 px panel): a tap whose contact drifts 25 px down over 120 ms (多看's flip
+    # gesture: > 20 px from the touch-down = a swipe, down = previous page) reaches Android without the drift
+    drift = [(0, [(0, 600, 800)])] + [(t, [(0, 600, 800 + 25 * t // 120)]) for t in range(10, 130, 10)] + [(140, [])]
+    f, r = frames_of(drift)
+    ys = [c[0][1] for c in f if c]
+    check(f[-1] == () and len(ys) == 1 and ys[0] <= 800 + 25 * 40 // 120 + 1, f'25 px drifting tap: one position (the held touch-down), no move reaches Android {f}')
+    f, r = frames_of(drift, 'TAP_PX=0\n')
+    ys = [c[0][1] for c in f if c]
+    check(max(ys) - min(ys) >= 15, f'TAP_PX=0: the drift is forwarded as before {ys}')
+    # a slow drag leaves the zone: from then on Android follows the finger, the first frame out has both axes
+    slow = [(0, [(0, 600, 800)])] + [(t, [(0, 600 + t // 10, 800 + t // 4)]) for t in range(10, 400, 10)] + [(410, [])]
+    f, r = frames_of(slow)
+    ys = [c[0][1] for c in f if c]
+    check(f[-1] == () and len(ys) > 20 and ys[-1] == 800 + 390 // 4 and all(b > a for a, b in zip(ys[1:], ys[2:])),
+          f'slow drag: out of the dead zone Android follows the finger ({len(ys)} positions, last {f[-2] if len(f) > 1 else None})')
+    out = [c for c in f[1:] if c]
+    if out:
+        x, y = out[0][0]
+        check(y - 800 > 28 and abs(x - (600 + (y - 800) * 4 // 10)) <= 1, f'slow drag: the first position out of the zone has both axes where the finger is ({x}, {y})')
+    else: check(False, 'slow drag: no position out of the zone')
+    # injected down / move / up (the emulator's test hook): moves are not lifted by the stuck watchdog
+    r = run(new, shim, 'B', 'tap', inject=['down 500 800', 'move 520 800', 'move 560 800', 'up'])
+    f = decode_mt(r['touch'])
+    check(((560, 800),) in f and f[-1] == () and 'resync (watchdog)' not in r['log'], f'--inject down/move/up: the moves reach Android, no watchdog lift {f}')
+    if '-k' not in sys.argv: subprocess.call(['rm', '-rf', r['dir']])
+
 
 THIRDS = [   # (scenario, gconf extra, extra args, actions, keys, touch reaches Android)
     ('eb_left', '', [], ['eb appopt'], [], False),
@@ -518,7 +596,7 @@ def stuck_cases(new):
     # watchdog: the finger is down (Android has it), then the kernel has no contact in that slot but the lift never
     # arrives (no more events): after --stuck-ms the contact is lifted, here and in Android
     d = tempfile.mkdtemp(prefix='vs-'); mt = os.path.join(d, 'mtstate')
-    down = [(0, [(0, 500, 800)]), (100, [(0, 510, 800)])]
+    down = [(0, [(0, 500, 800)]), (100, [(0, 540, 800)])]   # 40 px: out of the tap dead zone (TAP_PX), Android gets the move
     r = run(new, shim, 'B', 'wd', dict(PT, VT_MTSTATE=mt), frames=down + [(150, ('file', mt, '')), (900, [])],
             extra=['--stuck-ms', '300'], enc=EncoderPT())
     st, btn = android_state(r['touch'])
@@ -531,7 +609,7 @@ def stuck_cases(new):
     for env, what in ((dict(PT, VT_MTSTATE=os.path.join(d, 'none')), 'kernel has it'), (PT, 'no EVIOCGMTSLOTS')):
         r = run(new, shim, 'B', 'wd2', env, frames=down + [(1000, [])], extra=['--stuck-ms', '300'], enc=EncoderPT())
         fr = decode_mt(r['touch'])
-        check(fr == [((500, 800),), ((510, 800),), ()] and 'resync (watchdog)' not in r['log'] and 'release:' not in r['log'],
+        check(fr == [((500, 800),), ((540, 800),), ()] and 'resync (watchdog)' not in r['log'] and 'release:' not in r['log'],
               f'watchdog: a finger resting still 0.9 s stays down ({what}) {fr}')
         done(r)
     subprocess.call(['rm', '-rf', d])
@@ -556,7 +634,8 @@ def stuck_cases(new):
             for _, fingers in r['sent']:
                 f = tuple(sorted((x, y) for _, x, y in fingers))
                 if not want or want[-1] != f: want.append(f)
-            ok = ok and decode_mt(r['touch']) == want
+            hl = (60 if name.startswith('edge') or 'strip' in name else WINDOW) + 25
+            ok = ok and held_suffix(decode_mt(r['touch']), want, r['sent'], hl)
         check(ok, f'pt_mt {name}: actions {r["acts"]}, Android left with {st} BTN_TOUCH {btn}')
         done(r)
     # random multi-finger streams (seeds 119, 1201, 1380, 5106, 5234 left a contact down before the fix)
@@ -581,6 +660,9 @@ def check(cond, msg):
 def main():
     new, shim = sys.argv[1], sys.argv[2]
     base = sys.argv[sys.argv.index('--base') + 1] if '--base' in sys.argv else None
+    if os.environ.get('VT_ONLY') == 'held':          # VT_ONLY=held sh tests/vinput-test.sh: just the held-frames / dead zone cases
+        held_compact_cases(new)
+        print('FAILED: %d' % fails if fails else 'all passed'); sys.exit(1 if fails else 0)
     ref = {}
     for proto in ['B', 'A', 'AID', 'ST']:
         print(f'== source protocol {proto}')
@@ -595,7 +677,8 @@ def main():
                 for _, fingers in r['sent']:
                     f = tuple(sorted((x, y) for _, x, y in fingers))
                     if not want or want[-1] != f: want.append(f)
-                check(frames == want, f'{name}: virtual touch screen got the same contacts ({len(frames)} frames)')
+                hl = (60 if name.startswith('edge') or 'strip' in name else WINDOW) + 25
+                check(held_suffix(frames, want, r['sent'], hl), f'{name}: virtual touch screen got the same contacts, the hold as one touch-down ({len(frames)} of {len(want)} frames)')
                 downs = [e for e in r['touch'] if e[2] == EV_ABS and e[3] in (PX, TID)]
                 if downs:
                     lat = (downs[0][0] + downs[0][1] / 1e6 - r['sent'][0][0]) * 1000
@@ -625,13 +708,16 @@ def main():
                 raw = [e[2:] for e in o['touch']] == [e[2:] for e in r['touch']]
                 # fix/vinput-stuck names the slot in every frame and lifts by what Android was told: the raw stream can carry
                 # extra / fewer ABS_MT_SLOT writes than the old binary while Android sees the same contacts frame by frame
-                check(same_ka and (raw or decode_mt(o['touch']) == decode_mt(r['touch'])),
+                of, nf = decode_mt(o['touch']), decode_mt(r['touch'])
+                compact = fwd in (True, 'cancel') and nf[-1:] == of[-1:] and len(nf) < len(of) and all(f in of for f in nf)   # the hold as one touch-down + the tap dead zone
+                check(same_ka and (raw or of == nf or compact),
                       f'{name}: same as the old binary ({"event for event" if raw else "same contacts per frame"}, {len(r["touch"])} touch events)')
             if '-k' not in sys.argv:
                 subprocess.call(['rm', '-rf', r['dir']])
     stuck_cases(new)
     pressure_cases(new)
     early_release_cases(new)
+    held_compact_cases(new)
     boost_scroll_cases(new)
     thirds_cases(new)
     print('FAILED: %d' % fails if fails else 'all passed')

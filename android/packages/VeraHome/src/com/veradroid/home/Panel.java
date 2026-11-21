@@ -752,7 +752,7 @@ final class Panel {
         long stamp = f1.lastModified() * 31 + f1.length() * 7 + f2.lastModified() * 17 + f2.length() + System.currentTimeMillis() / 86400000L;
         if (stamp == seenStamp && seenStatus != null) return;
         seenStamp = stamp;
-        Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        Map<String, String> st = HostLink.status(ctx);
         Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
         String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString();
         if (key.equals(seenStatus)) return;

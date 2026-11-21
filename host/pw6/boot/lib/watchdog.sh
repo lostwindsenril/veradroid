@@ -41,6 +41,7 @@ diag_save() {
     ps > $d/kindle-ps.txt 2>/dev/null
     df -h > $d/kindle-df.txt 2>/dev/null
     free > $d/kindle-free.txt 2>/dev/null
+    { ls -la /var/local/platform-metrics/ /var/local/upstart/; df -k /var/local; initctl status platformmetricsd; initctl status minerva_service; } > $d/kindle-varlocal.txt 2>&1   # 开机卡树的排查（framework.sh pm_pending_guard）
     for f in version cmdline cpuinfo partitions filesystems modules devices buddyinfo vmstat zoneinfo slabinfo pagetypeinfo softirqs locks keys; do
         cat /proc/$f > $d/kindle-proc-$f.txt 2>/dev/null
     done
@@ -224,6 +225,20 @@ wd_guard() {
         echo $! > $W/watchdog.pid
     done
 }
+# 电量同步（fix/battery-sync）：nocap_mount 去掉 healthd 的 CAP_WAKE_ALARM 以后它建不起周期定时器（timerfd CLOCK_BOOTTIME_ALARM，
+# 没有 CAP_WAKE_ALARM 就 EPERM），Android 的电量只在驱动偶尔发的电池 uevent 时更新：应用里的状态栏、桌面停在充满时的 100 %
+# （PW6 1.03 用户“电量显示不同步”；测试机上 healthd 没有 timerfd，dmesg 里的 healthd 电量行只跟着驱动的 uevent 走）。
+# 没冻结时每 BAT_POKE_S 秒（默认 60，和 healthd 原来插着电时的周期一样）、刚解冻马上，给电池写一条 change uevent，healthd 照常重读
+# 并广播；不用定时器、不挂唤醒源，冻结时不发（休眠不受影响）。
+bat_poke_tick() {
+    bp_now=$(cut -d. -f1 ${BAT_UPTIME:-/proc/uptime})
+    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-60} ] || return 0
+    BAT_POKE_T=$bp_now
+    for bp_d in ${BAT_PS_DIR:-/sys/class/power_supply}/*; do
+        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] && echo change > $bp_d/uevent 2>/dev/null
+    done
+    return 0
+}
 watchdog() {
     # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
     # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).
@@ -258,8 +273,9 @@ watchdog() {
             [ -f $W/booted ] && type compile_watch >/dev/null 2>&1 && compile_watch
         fi
         type bat_log >/dev/null 2>&1 && bat_log
+        if [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ]; then BAT_POKE_T=0; else bat_poke_tick; fi
         type wa_adb_tick >/dev/null 2>&1 && wa_adb_tick     # 无线调试到时间自动关（webadmin.sh）
-        var_guard
+        var_guard; pm_pending_guard
         # 系统盘快满了就自动扩（storage.sh）。冻结时不做。
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ] || { type st_auto_tick >/dev/null 2>&1 && st_auto_tick; }
         if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done ) & fi

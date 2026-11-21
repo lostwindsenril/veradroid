@@ -14,9 +14,9 @@
 
 | 机型 | 安装包 | 当前版本 | 状态 |
 |---|---|---|---|
-| Kindle Paperwhite 6（2024） | `pw6` | 1.03 | 正式支持 |
-| Paperwhite 5、入门款 2022（KT5）、入门款 2024（KT6） | `k49` | 1.11 | 实验性，已有真实用户在用 |
-| Scribe、Colorsoft | `k49` | 1.11 | 实验性，只在模拟器里验证过；Colorsoft 按灰度显示，Scribe 不支持手写笔 |
+| Kindle Paperwhite 6（2024） | `pw6` | 1.04 | 正式支持 |
+| Paperwhite 5、入门款 2022（KT5）、入门款 2024（KT6） | `k49` | 1.12 | 实验性，已有真实用户在用 |
+| Scribe、Colorsoft | `k49` | 1.12 | 实验性，只在模拟器里验证过；Colorsoft 按灰度显示，Scribe 不支持手写笔 |
 | Paperwhite 2 / 3 / 4、Voyage、Oasis 2 / 3 等老机型 | `legacy` | 0.8.14 | 测试阶段 |
 
 固件版本、越狱方式等细节以网站上的说明为准。
@@ -138,8 +138,8 @@ VeraDroid runs Android 7.1.1 (built from AOSP `android-7.1.1_r61`) on jailbroken
 root file system inside a container on the Kindle's own Linux kernel; nothing is flashed and the Kindle system partition is
 not modified, so you can always return to the stock Kindle UI.
 
-- Supported: Kindle Paperwhite 6 (package `pw6` 1.03, official); Paperwhite 5, Kindle 2022 / 2024 (`k49` 1.11, experimental,
-  used by real users); Scribe and Colorsoft (`k49` 1.11, experimental, verified on an emulator only; Colorsoft runs in grayscale,
+- Supported: Kindle Paperwhite 6 (package `pw6` 1.04, official); Paperwhite 5, Kindle 2022 / 2024 (`k49` 1.12, experimental,
+  used by real users); Scribe and Colorsoft (`k49` 1.12, experimental, verified on an emulator only; Colorsoft runs in grayscale,
   no pen on Scribe); older models PW2 / PW3 / PW4 / Voyage / Oasis 2 / 3 (`legacy` 0.8.14, testing).
 - Components: host shell scripts (`host/`), an e-ink display bridge (`display/`, uses FBInk), an input front-end (`input/`),
   AOSP device config and patches (`android/`), the VeraHome launcher and VeraIME input method, installer scripts (`cloud/static/`).

@@ -1299,7 +1299,7 @@ public class HomeActivity extends Activity {
     private void refreshStatus() {
         String name = prefs.getString("name", "VeraDroid");
         String clock = Ui.clock(this) + (name.length() > 0 ? "    " + name : "");
-        Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        Map<String, String> st = HostLink.status(this);
         StringBuilder sb = new StringBuilder();
         if ("0".equals(st.get("wifi"))) sb.append("Wi-Fi 关   ");
         if (st.get("battery") != null) {

@@ -16,9 +16,14 @@ blk() { sed -n "/^# BEGIN $1\$/,/^# END $1\$/p" "$2"; }
 # are left out of the comparison until the legacy installer has them too.
 NX='^             "\$SYS/rootfs/system/lib/libvdshim\.so" \\$'
 grep -q 'system/lib/libvdshim\.so' $L && NX='^$^'
+# 1.04: hidden image files under chroot-mode bind mounts (vd_parts_under) and the early system-disk space check are
+# new-model-only too until the legacy installer has them
+nx() { if grep -q '^vd_parts_under()' $L; then cat; else
+    sed -e '/^# BEGIN vd_parts_under$/,/^# END vd_parts_under$/d' -e '/^    vd_parts_under >> "\$PD\/src\.rootfs"$/d' \
+        -e '/^    # 系统盘（镜像机型）够不够装：/d' -e '/^    PARTS=1; vd_sys_room_early; PARTS=$/d'; fi; }
 for b in vd_dl vd_parts; do
     [ -n "$(blk $b $L)" ] || [ -n "$(blk $b $N)" ] || fail "no installer has the $b block"
-    if [ -n "$(blk $b $L)" ] && [ -n "$(blk $b $N)" ]; then [ "$(blk $b $L)" = "$(blk $b $N | grep -v -- "$NX")" ] || fail "$b block differs between $L and $N"; fi
+    if [ -n "$(blk $b $L)" ] && [ -n "$(blk $b $N)" ]; then [ "$(blk $b $L)" = "$(blk $b $N | grep -v -- "$NX" | nx)" ] || fail "$b block differs between $L and $N"; fi
 done
 sh -n $L || fail "syntax $L"; sh -n $N || fail "syntax $N"
 [ -n "$(blk vd_dl $L)" ] || L=$N      # 下面跑的是有这一块的那个安装器里的代码

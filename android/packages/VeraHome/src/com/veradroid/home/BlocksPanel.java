@@ -527,7 +527,7 @@ final class BlocksPanel {
         long stamp = f1.lastModified() * 31 + f1.length() * 7 + f2.lastModified() * 17 + f2.length() + System.currentTimeMillis() / 60000L;
         if (stamp == seenStamp && seen != null) return;
         seenStamp = stamp;
-        Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
+        Map<String, String> st = HostLink.status(ctx);
         Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
         String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString() + System.currentTimeMillis() / 60000L;
         if (key.equals(seen)) return;

@@ -196,8 +196,27 @@ fw_stop_kpp() {
     t "fw: library app stopped before pausing the window manager ($((i * 50)) ms, $how)"
 }
 
+# Kindle 开机卡在树的画面（2026-11-21，社区“装完微信读书看了一会就无限重启卡大树”排查，KT6 5.20.2 模拟器复现）：
+# 5.18.6 起的新固件，/etc/upstart/system_setup.conf 的 pre-start 里有一句 `platformmetricsd-send-notification reboot reboot`。
+# 指标守护进程 platformmetricsd 没在跑（它挂在 lab126 后面，开机早期本来就没起来；停掉 / 冻住 Kindle 界面时也收不到）时，
+# 每条通知追加到 /var/local/platform-metrics/pending-notifications，等它起来再取走。这个文件超过 64 KB（libplatformmetrics 的
+# 上限 65536）以后这个命令就退出 255 -> system_setup 起不来 -> 没有 dbus / lab126 / X / 框架，platformmetricsd 也就永远起不来
+# 把文件取走：每次开机都停在开机画面，Kindle 自己出不来（/var/local 不在 USB 盘里，用户也删不了）。
+# 文件里是 Kindle 自己的遥测（各进程的 lipc 调用失败计数等），不是用户数据。超过 32 KB 就只留最新的约 16 KB（整行）。
+PM_PENDING=${PM_PENDING:-/var/local/platform-metrics/pending-notifications}
+pm_pending_guard() {
+    [ -f "$PM_PENDING" ] && [ ! -L "$PM_PENDING" ] || return 0
+    pg_sz=$(wc -c < "$PM_PENDING" 2>/dev/null | tr -d ' ')
+    [ "${pg_sz:-0}" -gt 32768 ] 2>/dev/null || return 0
+    # 新内容写回原文件（cat >：属主 / 权限不变，platformmetricsd 用 framework 用户写它）；去掉截断处不完整的第一行
+    tail -c 16384 "$PM_PENDING" 2>/dev/null | sed 1d > "$PM_PENDING.vd" 2>/dev/null && cat "$PM_PENDING.vd" > "$PM_PENDING" 2>/dev/null
+    rm -f "$PM_PENDING.vd"
+    t "kindle: $PM_PENDING was $pg_sz bytes (over 64 KB the Kindle hangs at the boot logo): kept the newest $(wc -c < "$PM_PENDING" | tr -d ' ') bytes"
+    return 0
+}
 framework_stop() {
     mkdir -p $FWD $SYS || return 1
+    pm_pending_guard
     framework_paused && { t "kindle ui already paused"; return 0; }
     fb_geom
     [ -n "$FB_STRIDE" ] && [ -n "$FB_ROWS" ] || { t "cannot read fb geometry"; return 1; }
@@ -378,6 +397,7 @@ launcher_ensure() {
 }
 
 framework_start() {
+    pm_pending_guard
     framework_paused || { t "kindle ui not paused"; return 0; }
     # 后台停服务还没做完：叫它别再往下做（不起 vdkaf、不自检、不冻），等它收尾；还在等某个服务退出的话最多等 20 秒，
     # 过了就把那一段杀掉再往下（它不能在我们恢复之后再动 Kindle 的东西）

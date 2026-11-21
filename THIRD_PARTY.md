@@ -67,7 +67,7 @@ glibc 源码可从 Ubuntu 的源码包获取（`apt-get source glibc`，对应�
 ### Chromium WebView 119（BSD-3-Clause 等）
 
 - 只在 1 GB 机型上、用户打开“显示与刷新 → 网页内核（实验）”时下载，不进安装包、不入库。
-- 构建：社区用户 momo 从 https://chromium.googlesource.com/chromium/src/+/refs/tags/119.0.6045.194 编译 `system_webview_apk`
+- 构建：社区用户 Embrith余烬 从 https://chromium.googlesource.com/chromium/src/+/refs/tags/119.0.6045.194 编译 `system_webview_apk`
   （`target_cpu="arm"`、`is_official_build=true`、`proprietary_codecs=false`、`use_official_google_api_keys=false`、
   `system_webview_package_name="com.embrith.webview"`），加了一个去掉 Google Play 服务客户端库的小补丁（定位、形状检测、
   短信验证码三处改走不依赖 Play 服务的路径）。补丁和构建说明在下载包里（`chromium-nogms.patch`、`BUILD.txt`）。

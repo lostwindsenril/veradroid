@@ -332,7 +332,7 @@ nocap_mount() {        # 容器里（run_in_ns），/dev 的 tmpfs 建好之后�
     return 0
 }
 # 可选的新网页内核（WEBVIEW=alt，docs/webview-alt.md）：Chromium 119.0.6045.194 WebView，包名 com.embrith.webview
-# （社区用户 momo 从 Chromium 源码编的，去掉了 Google Play 服务客户端库，minSdk 24，armeabi-v7a，贡献者自己的签名）。
+# （社区贡献者 Embrith余烬 从 Chromium 源码编的，去掉了 Google Play 服务客户端库，minSdk 24，armeabi-v7a，贡献者自己的签名）。
 # 不进镜像、不进安装包：用户在“显示与刷新”里打开时才下载（webview_dl，约 45 MB，sha256 钉死在下面），解到 $VD/webview-alt：
 #   app/webview.apk（原样）、overlay/webview-alt-overlay.apk（android/webview-alt/overlay：framework-res 的资源覆盖，
 #   config_webview_packages 只列 com.embrith.webview 并钉死它的证书）。

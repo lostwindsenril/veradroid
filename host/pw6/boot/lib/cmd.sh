@@ -3,6 +3,20 @@
 # 一行一条：exit stop restart diag diag-upload feedback clear invert status apply | light N | warmth N | wifi 0|1
 #   compile all|<包> | localupdate check|install（完整列表见 docs/host-settings.md）
 numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
+# 调亮度（桌面面板的亮度条、管理网页、优化建议都走这里）。自动亮度开着（powerd flAuto=1）时 powerd 按光线传感器隔一会儿
+# 就把亮度改回去，看起来就是“调了没反应”（PW5 签名版等带传感器的机型；桌面的“自动”开关只在宿主认出传感器时才显示，
+# 认不出时用户关不掉它）。手动调了就是要手动：先把自动关掉。设完读回来，对不上就记一行（诊断里看得到是哪一步没生效）。
+light_set() {
+    ls_p=com.lab126.powerd; ls_a=
+    if [ "$(lipc-get-prop $ls_p flAuto 2>/dev/null)" = 1 ]; then
+        lipc-set-prop -i $ls_p flAuto 0 2>/dev/null && ls_a=1 && t "light: auto brightness was on (powerd flAuto=1), turned it off for the manual level $1"
+    fi
+    lipc-set-prop -i $ls_p flIntensity "$1" >/dev/null 2>&1 || t "light $1: lipc-set-prop flIntensity failed"
+    ls_g=$(lipc-get-prop $ls_p flIntensity 2>/dev/null)
+    [ "$ls_g" = "$1" ] || t "light $1: powerd reads back '$ls_g' (raw $(lipc-get-prop $ls_p flRawIntensity 2>/dev/null))"
+    [ -z "$ls_a" ] || status_write      # 面板上的“自动”勾掉
+    return 0
+}
 # 管理网页的请求（SSH、截屏、日志、占用、自动更新）：先校验来源再做，见 webadmin.sh
 [ -f "$VD/boot/lib/webadmin.sh" ] && . "$VD/boot/lib/webadmin.sh"
 # 每个应用的显示设置（前台应用 → 显示参数，三个宿主共用一份，见 appprof.sh）
@@ -356,7 +370,7 @@ cmd_listen() {
         invert)
             cur=$(sed -n 's/^KFB_INVERT=//p' $X/settings 2>/dev/null); [ "$cur" = 1 ] && n=0 || n=1
             echo "KFB_INVERT=$n" > $X/ctl/settings.new; settings_apply ;;
-        light)   numeric "$a" && lipc-set-prop -i com.lab126.powerd flIntensity "$a" ;;
+        light)   numeric "$a" && light_set "$a" ;;
         lightauto) case "$a" in 0|1) lipc-set-prop -i com.lab126.powerd flAuto "$a" 2>/dev/null; status_write ;; esac ;;   # 自动调整亮度（有光线传感器的机型）
         warmth)  numeric "$a" && lipc-set-prop -i com.lab126.powerd currentAmberLevel "$a" ;;
         sleeptime) numeric "$a" && [ "$a" -ge 60 ] && lipc-set-prop -i com.lab126.powerd screenSaverTimeout "$a" ;;
@@ -425,12 +439,15 @@ cmd_listen() {
                   type vp_kvw >/dev/null 2>&1 && vp_kvw $X/ctl/apkinst.status "state=$ist" "name=$iname" "result=$r"
                   # 装好了：后台低优先级预编译（compile.sh；packages.list 变了，扫描会找到新装的包）
                   type compile_release >/dev/null 2>&1 && compile_release
+                  # 装完 / 更新完：按清单停用这个应用的后台组件（appslim.sh；新版本可能换了组件名）
+                  case "$r" in *Success*) type appslim_all >/dev/null 2>&1 && appslim_all install ;; esac
                   case "$r" in *Success*) type compile_watch >/dev/null 2>&1 && compile_watch
                       type shizuku_start >/dev/null 2>&1 && shizuku_start ;; esac ) &
             fi ;;
         netdiag) # 桌面“网络诊断”：Wi-Fi / 域名解析 / 服务器 / 速度，结果写 ctl/netdiag.status（progress.sh 的 vp_netdiag）
             type vp_netdiag >/dev/null 2>&1 && ( vp_netdiag $X/ctl/netdiag.status ) </dev/null >/dev/null 2>&1 & ;;
         saver)   type saver_cmd >/dev/null 2>&1 && saver_cmd "$a" ;;   # saver list | done（saver.sh）：屏保挑选页要看 veradroid/screensaver 里的图
+        appslim) type appslim_cmd >/dev/null 2>&1 && ( appslim_cmd "$a" ) & ;;   # appslim <包> | all | restore（appslim.sh，后台瘦身）
         compile) type compile_cmd >/dev/null 2>&1 && compile_cmd "$a" ;;   # compile all | compile <包>（compile.sh）；进度 ctl/compile.status
         webview) case "$a" in get|cancel) type webview_cmd >/dev/null 2>&1 && webview_cmd "$a" ;; esac ;;   # 新网页内核下载 / 取消（container.sh webview_dl，进度 ctl/webview.status）
         localupdate) # 离线更新文件夹（localupdate.sh）：check = 只看文件名，结果写 ctl/update.local；install = 校验并安装

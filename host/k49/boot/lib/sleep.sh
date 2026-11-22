@@ -121,12 +121,13 @@ sleep_apply() {
         if alive $W/installing; then
             touch $W/saver_nofreeze; t "screensaver: an apk is being installed, android left running"
         else
-            android_freeze && touch $W/saver_frozen
+            # 冻不住（android_freeze 已经解冻回来）：当作没冻，醒来时不用解冻
+            if android_freeze; then touch $W/saver_frozen; else touch $W/saver_nofreeze; fi
         fi
         type wifi_ps_restore >/dev/null 2>&1 && wifi_ps_restore
         screensaver_show
         date +%s > $W/saver.t0      # 墙上时间（休眠期间 uptime 不走），醒来时看冻了多久（SAVER_EXIT_H）
-        t "screensaver on, android frozen" ;;
+        if [ -f $W/saver_frozen ]; then t "screensaver on, android frozen"; else t "screensaver on, android left running"; fi ;;
     active)
         echo active > $W/sleep.cur
         [ "$cur" = saver ] || return 0
@@ -137,7 +138,9 @@ sleep_apply() {
         rm -f $W/saver_frozen
         rm -f $X/ctl/sleep
         epd_send REDRAW
-        t "screensaver off, android thawed" ;;
+        t "screensaver off, android thawed"
+        # 休眠期间 Wi-Fi 断过、重连（可能换了地址 / DNS）：等 Kindle 连上后从 Android 里查一次，不通就修（network.sh）
+        type net_heal_kick >/dev/null 2>&1 && net_heal_kick resume ;;
     esac
 }
 sleep_state() {   # powerd 现在的状态 -> saver / active（读不到或在中间状态时什么都不输出）

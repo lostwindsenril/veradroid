@@ -91,7 +91,7 @@
  *
  * Usage:
  *     veradroid-epd run  <shm> <fifo> <ctl> [--w 1272] [--h 1696] [--contrast 1.3] [--dither 3]
- *                        [--anim-mode 0..5] [--anim-dir 0..3] [--anim-steps 12] [--anim-min 60] [--rotate 0|90|180|270]
+ *                        [--anim-mode 0..5] [--anim-dir 0..3] [--anim-steps 12] [--anim-min 60] [--swipe 0|1] [--rotate 0|90|180|270]
  *                        [--vw <visible width>] [--pwrdown <ms>] [--skip-cfa 0|1] [--pace 0|1] [--clean <ms>]
  *                        [--lightf 0..3] [--darken 0|1]
  *
@@ -312,6 +312,16 @@ static int anim_next = 0;
 /* SWIPE <dir> <steps> (VeraHome 方块风格的换页 / 设置单动画): one shot, its own direction and step count. It does not touch
    anim_dir / anim_steps (the user's ANIM settings for normal page turns) and it works even when ANIM is off. */
 static int once_dir = -1, once_steps = 0;
+/* Hardware swipe on/off (--swipe 0|1, SWIPEOK 0|1; host KFB_SWIPE). On the Kindle 2024 / KT6 (rossini) emulator 4 of 5 swipes
+   (even 1-2 steps) end in "wait timeout, lut status" / "trigger pipeline fail": the update never completes, the panel keeps the
+   old picture and every later partial refresh is lost until a full GC16 refresh - the screen looks frozen although Android
+   still runs (field report: Kindle 2024, the panel "vanished" and nothing responded any more, forced reboot). So:
+   swipe_ok = 0 drops every swipe (SWIPE one-shots and ANIM page turns, drawn as normal refreshes), and whatever the setting,
+   a swipe whose completion takes longer than SWIPE_SLOW_MS (normal: 130-400 ms) or fails turns swipes off for this run and
+   brings the panel back with one full refresh (swipe_recover, done by the main loop). */
+static int swipe_ok = 1;
+static volatile int swipe_broken = 0, swipe_recover = 0;
+#define SWIPE_SLOW_MS 2500
 static long once_until = 0;    /* a SWIPE that no frame followed within 800 ms is dropped (it must not animate some later change) */
 static int swipe_steps = 12;   /* step count of the swipe being sent (anim_steps, or once_steps for a SWIPE one-shot) */
 static int g_rot = 0;          /* 0 / 90 / 180 / 270, see the header */
@@ -415,7 +425,7 @@ static int maybe_animate(FBInkConfig *c, int w, int h, int flash)
 {
     int one = anim_next, od = once_dir, os = once_steps;
     anim_next = 0; once_dir = -1;
-    if (flash || !g_is_mtk) return 0;
+    if (flash || !g_is_mtk || !swipe_ok || swipe_broken) return 0;
     if (one && od >= 0) {
         /* SWIPE one-shot: its own direction / steps, independent of the ANIM settings */
         if (os < 1) os = 1;
@@ -635,7 +645,7 @@ static void rgba_to_y8_rot(const uint8_t *src, int x, int y, int w, int h, uint8
    The main loop uses it for PACE and CLEAN, and the log gets "panel done" lines while <ctl>/timing exists - without
    blocking the main loop (the old timing code waited after every region, which made several regions look serial). */
 #define MAXBUSY 32
-struct busy { uint32_t marker; int x0, y0, x1, y1; long t0; int done; };
+struct busy { uint32_t marker; int x0, y0, x1, y1; long t0; int done, anim; };
 static struct busy busyq[MAXBUSY];
 static int nbusy = 0;
 static pthread_mutex_t busy_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -657,9 +667,15 @@ static void *waiter_main(void *arg)
             pthread_cond_wait(&busy_cv, &busy_mu);
         }
         uint32_t m = busyq[i].marker;
+        int m_anim = busyq[i].anim;      /* kept here: busy_add drops entries older than 3 s while we wait */
+        long m_t0 = busyq[i].t0;
         pthread_mutex_unlock(&busy_mu);
         int wr = wait_marker(m);
         long t = now_ms();
+        if (m_anim && !swipe_broken && (wr < 0 || t - m_t0 >= SWIPE_SLOW_MS)) {
+            swipe_broken = 1; swipe_recover = 1;
+            fprintf(stderr, "[%ld] epd: swipe did not complete (%ld ms, wait rc=%d): hardware swipe off for this run, full refresh\n", t, t - m_t0, wr);
+        }
         pthread_mutex_lock(&busy_mu);
         for (i = 0; i < nbusy; i++)
             if (busyq[i].marker == m && !busyq[i].done) {
@@ -674,7 +690,7 @@ static void *waiter_main(void *arg)
     return NULL;
 }
 
-static void busy_add(int x, int y, int w, int h, long t0)
+static void busy_add(int x, int y, int w, int h, long t0, int anim)
 {
     if (!waiter_on) return;
     pthread_mutex_lock(&busy_mu);
@@ -684,7 +700,7 @@ static void busy_add(int x, int y, int w, int h, long t0)
     nbusy = k;
     if (nbusy == MAXBUSY) { memmove(busyq, busyq + 1, sizeof(busyq[0]) * (MAXBUSY - 1)); nbusy--; }
     struct busy *b = &busyq[nbusy++];
-    b->marker = last_marker(); b->x0 = x; b->y0 = y; b->x1 = x + w; b->y1 = y + h; b->t0 = t0; b->done = 0;
+    b->marker = last_marker(); b->x0 = x; b->y0 = y; b->x1 = x + w; b->y1 = y + h; b->t0 = t0; b->done = 0; b->anim = anim;
     pthread_cond_signal(&busy_cv);
     pthread_mutex_unlock(&busy_mu);
 }
@@ -853,7 +869,7 @@ static int open_fb(void)
     }
     fprintf(stderr, "epd: %s (%s/%s) %ux%u %ubpp mtk=%d\n", st.device_name, st.device_codename, st.device_platform,
             st.screen_width, st.screen_height, st.bpp, st.is_mtk);
-    fprintf(stderr, "epd: anim_mode=%d dir=%d steps=%d min=%d%%\n", anim_mode, anim_dir, anim_steps, anim_min_pct);
+    fprintf(stderr, "epd: anim_mode=%d dir=%d steps=%d min=%d%% swipe=%d\n", anim_mode, anim_dir, anim_steps, anim_min_pct, swipe_ok);
     if (g_rot) fprintf(stderr, "epd: rotate %d: logical %dx%d on panel %dx%d (visible width %d)\n", g_rot, LW, LH, W, H, VW);
     return 0;
 }
@@ -1050,7 +1066,7 @@ static int push_y8(const uint8_t *buf, int x, int y, int w, int h, int mode)
         /* sent while an earlier refresh of the same pixels is still running on the panel: the driver merges the two
            (collision) and the partial waveforms leave pixels between the two pictures */
         int coll = !g_cleaning && qpass_ms > 0 && busy_overlap(x, y, x + w, y + h, t0) > 0;
-        busy_add(x, y, w, h, t0);
+        busy_add(x, y, w, h, t0, c.is_animated);
         {   /* quality pass bookkeeping: REAGL (sent FULL) and the GC16 FULL flash are full quality; GL16 FULL is full quality
                only where it stands in for REAGL (4-bit i.MX). 1-bit, swipes and collisions count as low quality. */
             int fullq = c.is_flashing && (c.wfm_mode == WFM_GC16 || c.wfm_mode == WFM_REAGL || c.wfm_mode == WFM_GLRC16 ||
@@ -1526,7 +1542,7 @@ static void bg_draw(void)
     fprintf(stderr, "[%ld] epd: badge %dx%d+%d+%d -> %d (%ld ms)\n", t0, w, h, x0, y0, rc, now_ms() - t0);
     if (rc < 0) return;
     n_sent++;
-    busy_add(x0, y0, w, h, t0);
+    busy_add(x0, y0, w, h, t0, 0);
     bg_sent = n_sent;
     bg_px0 = x0; bg_py0 = y0; bg_px1 = x1; bg_py1 = y1; bg_drawn = 1;
 }
@@ -1750,6 +1766,11 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
         if (sr < 0) { if (errno != EINTR) usleep(1000); continue; }
         int panel_event = 0;
         if (sr > 0 && pfd >= 0 && FD_ISSET(pfd, &rf)) { char junk[64]; while (read(pfd, junk, sizeof(junk)) > 0) {} panel_event = 1; }
+        if (panel_event && swipe_recover && access(sleepf, F_OK) != 0) {   /* a swipe hung the panel: one full refresh of the current picture */
+            swipe_recover = 0; held_page = -1; prev_valid = 0; cl_valid = 0; req_y0 = -1; once_dir = -1; anim_next = 0;
+            show_page(fbmem, last_page, M_FULL, 1, 0, 0);
+            continue;
+        }
         if (sr == 0 || (panel_event && !FD_ISSET(ffd, &rf))) {
             nowt = now_ms();
             if (access(sleepf, F_OK) == 0) { held_page = -1; cl_valid = 0; burst_dirty = 0; need_full = 1; pend_y0 = -1; qp_valid = 0; scroll_dirty = 0; scroll_frames = 0; scroll_on = 0; continue; }
@@ -1938,6 +1959,14 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
                 int d = anim_dir;
                 if (sscanf(line + 3, "%d", &d) >= 1 && d >= 0 && d <= 3) anim_dir = d;
             }
+            else if (!strncmp(line, "ANIMHOLD", 8)) {   /* ANIMHOLD <ms>: page-slide hold quiet window (0 = off); checked before ANIM */
+                int v;
+                if (sscanf(line + 8, "%d", &v) == 1 && v >= 0 && v <= 500) { anim_quiet_ms = v; if (!v && held_why == 5 && held_page >= 0) held_until = now_ms(); }
+            }
+            else if (!strncmp(line, "SWIPEOK", 7)) {    /* SWIPEOK <0|1>: hardware swipe allowed (KFB_SWIPE); an automatic switch-off stays */
+                int v;
+                if (sscanf(line + 7, "%d", &v) == 1) { swipe_ok = v != 0; if (!swipe_ok) { once_dir = -1; anim_next = 0; } }
+            }
             else if (!strncmp(line, "ANIM", 4)) {
                 /* ANIM <0|1> [dir] [steps] [min_pct]: enable/disable the MTK hardware page-turn animation */
                 int a = anim_mode, d = anim_dir, s = anim_steps, mp = anim_min_pct;
@@ -2001,10 +2030,6 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
                 int v;
                 if (sscanf(line + 5, "%d", &v) == 1 && v >= 0 && v <= 5000) { clean_ms = waiter_on ? v : 0; if (!clean_ms) cl_valid = 0; }
             }
-            else if (!strncmp(line, "ANIMHOLD", 8)) {   /* ANIMHOLD <ms>: page-slide hold quiet window (0 = off) */
-                int v;
-                if (sscanf(line + 8, "%d", &v) == 1 && v >= 0 && v <= 500) { anim_quiet_ms = v; if (!v && held_why == 5 && held_page >= 0) held_until = now_ms(); }
-            }
             else if (!strncmp(line, "TURNHOLD", 8)) {   /* TURNHOLD <ms>: page-turn merge window (0 = off), see turn_quiet_ms */
                 int v;
                 if (sscanf(line + 8, "%d", &v) == 1 && v >= 0 && v <= 1000) {
@@ -2021,7 +2046,7 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
                 /* SWIPE <dir> <steps>: animate the next change (one shot) with this direction (0 down, 1 up, 2 left, 3 right,
                    in the logical picture) and step count; the ANIM settings are left alone */
                 int d = -1, s = 3;
-                if (sscanf(line + 5, "%d %d", &d, &s) >= 1 && d >= 0 && d <= 3) {
+                if (swipe_ok && !swipe_broken && sscanf(line + 5, "%d %d", &d, &s) >= 1 && d >= 0 && d <= 3) {
                     once_dir = d;
                     once_steps = s < 1 ? 1 : s > MTK_MAX_SWIPE ? MTK_MAX_SWIPE : s;
                     once_until = now_ms() + 800;
@@ -2270,6 +2295,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pwrdown") && i + 1 < argc) pwrdown_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--skip-cfa") && i + 1 < argc) skip_cfa = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--anim-min") && i + 1 < argc) anim_min_pct = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--swipe") && i + 1 < argc) swipe_ok = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--invert") && i + 1 < argc) g_invert = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--settle-first") && i + 1 < argc) settle_first = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scroll-du") && i + 1 < argc) burst_du_ms = atoi(argv[++i]);

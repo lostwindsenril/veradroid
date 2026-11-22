@@ -102,6 +102,8 @@ display_stop
 # 共用网络模式下传书开着时放行过的端口（cmd.sh fwd_on）：撤掉，不让 Kindle 的防火墙一直开着这个口
 case "$(cat $W/fwd.id 2>/dev/null)" in ipt:*) iptables -D INPUT -i "$(cut -d: -f3 $W/fwd.id)" -p tcp --dport "$(cut -d: -f2 $W/fwd.id)" -j ACCEPT 2>/dev/null ;; esac
 # saver_*：屏保期间被停掉时 sleep.sh 来不及删；残留的 saver_frozen 让下一次运行的看门狗一直当作在屏保（不预编译、不应用设置、蓝牙按键全丢；PW6 真机遇到）
+kill $(cat $W/netheal.pid 2>/dev/null) 2>/dev/null
+rm -f $W/netheal.pid $W/net.sig $W/net.last $W/resolv.new
 rm -f $W/fwd.id $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
 
 # legacy（3.0 内核，只有挂载命名空间）：容器进程不会随 init 一起消失，按“根目录和容器 init 相同”逐个杀；
@@ -136,7 +138,7 @@ freezer_cleanup
 kmsg "container mounts released"
 # 多看在前台时换过的显示密度会存进 Android 的设置文件：容器已经没了，趁系统盘还挂着把它抹掉（appprof.sh；下次开机前还会再抹一次）
 [ -f "$VD/boot/lib/appprof.sh" ] && . "$VD/boot/lib/appprof.sh" && appprof_density_scrub >> $LOG 2>&1
-[ -n "$STALE" ] && { rm -rf $W/kfb; storage_umount; exit 0; }
+[ -n "$STALE" ] && { lmk_kernel_restore 2>/dev/null || true; rm -rf $W/kfb; storage_umount; exit 0; }
 readahead_restore 2>/dev/null || true
 dedup_stop 2>/dev/null || true
 zram_restore

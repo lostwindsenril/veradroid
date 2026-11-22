@@ -80,7 +80,7 @@ compile_mode() {
 compile_done_filter() { # filter [target]
     case "${2:-speed}" in
         speed-profile) case "$1" in speed-profile|speed|everything) return 0 ;; esac ;;
-        interpret-only) [ -n "$1" ] && return 0 ;;
+        interpret-only|verify-at-runtime) [ -n "$1" ] && return 0 ;;
         *) case "$1" in speed|everything) return 0 ;; esac ;;
     esac
     return 1
@@ -128,7 +128,19 @@ compile_prof_back() { # pkg：编成了（odex 是 speed-profile）就只删存�
     done
 }
 # 这个包实际用的过滤器（$2 = 设置给的，speed）
+# 512 MB 机型上的大应用：只编 verify-at-runtime（COMPILE_BIG_LOW=off 恢复以前的 interpret-only / speed-profile）。
+# PW5 5.16.2 模拟器（485 MB，2026-11-21）番茄 7.4.5（243 MB dex）：
+#   安装时的 interpret-only：dex2oat 占到 455 MB（RSS 130 + 交换 325），交换区用完、88 次 page allocation failure，
+#     600 s 还没编完被停，结果一个 odex 也没有；
+#   没有 odex 时打开它：dex 整个解压进应用自己的匿名内存，主进程 RSS 143 + 交换 190 MB，可用内存掉到 20–60 MB，
+#     2 分钟里 40 次分配失败、1024 次交换区写入失败（用户诊断里“番茄卡死、点什么都没反应”的样子）；
+#   verify-at-runtime：74 s 编完，dex2oat 峰值 256 MB，交换区几乎没动、0 次失败；之后打开番茄 dex 从 odex 里映射
+#     （97 MB 是可以随时丢掉再读回的文件页），可用内存一直在 225 MB 左右、交换只用 10 MB。
+# 代价：类的校验挪到运行时（和没有 odex 时一样），只是不再占匿名内存。
+compile_low_big() { lowmem_ram && [ "${COMPILE_BIG_LOW:-on}" != off ] && compile_big "$1"; }
+compile_light_filter() { if compile_low_big "$1"; then echo verify-at-runtime; else echo interpret-only; fi; }
 compile_pkg_mode() { # pkg mode
+    [ "$2" = speed ] && compile_low_big "$1" && { echo verify-at-runtime; return 0; }
     [ "$2" = speed ] && compile_big "$1" || { echo "$2"; return 0; }
     if compile_has_profile "$1" && ! compile_timed_out "$1" speed-profile; then echo speed-profile; else echo interpret-only; fi
 }
@@ -370,7 +382,9 @@ compile_fg() { head -n 1 $X/fg 2>/dev/null | tr -d '\r '; }
 compile_app_uid() { awk -v p="$1" '$1 == p { print $2; exit }' $SYS/data/system/packages.list 2>/dev/null; }
 compile_app_running() { # pkg
     car_u=$(compile_app_uid "$1"); [ -n "$car_u" ] || return 1
-    awk -v u="$car_u" '/^Uid:/ { if ($2 == u) { f = 1; exit } } END { exit !f }' /proc/[0-9]*/status 2>/dev/null
+    # 经 cat 读：busybox awk 打不开一个文件（进程在 glob 展开后、awk 读到它之前退出了）就整个退出、END 不跑，
+    # 排在后面的应用进程根本没被看到 → 误判“没在跑”，编译开了又被停，一分钟一次反复（PW5 用户诊断 2026-11-21）。cat 跳过读不到的接着读。
+    cat /proc/[0-9]*/status 2>/dev/null | awk -v u="$car_u" '/^Uid:/ { if ($2 == u) { f = 1; exit } } END { exit !f }'
 }
 # 队列里只剩在跑的应用（不在前台）：用户空闲、等了 COMPILE_RUNNING_WAIT_S（默认 600）秒以后，请 Android 结束它可以安全结束的
 # 进程（am kill：只杀后台 / 缓存进程，不碰前台和正在被用的服务），每个包 10 分钟最多一次。结束不了就继续等，不强编。
@@ -660,7 +674,10 @@ compile_dex2oat_for() { # pkg：有给它编译的 dex2oat / patchoat 在跑
 # 改编 speed-profile（只编档案里的热点方法）：一台 PW6 测试机实测番茄 194 秒编完，冷启动到主界面从约 2 分钟降到 28 秒。
 # 没有档案（刚装好还没打开过）、或者不是超时，就补 interpret-only。
 compile_light() { # pkg [timeout]
-    if [ "$2" = timeout ] && compile_has_profile "$1" && [ "${COMPILE_PROFILE_FALLBACK:-on}" != off ]; then
+    if compile_low_big "$1"; then       # 512 MB 的大应用：只补 verify-at-runtime（见 compile_low_big）
+        compile_pm_start "$1" $W/compile.light.out -m verify-at-runtime -f "$1"
+        compile_babysit $cp_ "$1"; compile_pm_wait
+    elif [ "$2" = timeout ] && compile_has_profile "$1" && [ "${COMPILE_PROFILE_FALLBACK:-on}" != off ]; then
         compile_prof_save "$1"
         compile_pm_start "$1" $W/compile.light.out -m speed-profile -f "$1"
         compile_babysit $cp_ "$1"; compile_pm_wait
@@ -876,7 +893,7 @@ compile_worker() {
         idx=$((idx + 1)); echo $idx > $W/compile.index
         pmode=$(compile_pkg_mode "$pkg" "$mode")
         # 大应用没有 JIT 档案（还没用过）、已经有安装时的 odex：没有更轻的可编，留着（不为一次 interpret-only 再占几百 MB）
-        if [ "$pmode" = interpret-only ] && [ -n "$(odex_filter "$pkg")" ] && [ "$force" != stale ]; then
+        if { [ "$pmode" = interpret-only ] || [ "$pmode" = verify-at-runtime ]; } && [ -n "$(odex_filter "$pkg")" ] && [ "$force" != stale ]; then
             t "compile: $pkg is large ($(compile_dex_mb "$pkg" || echo ?) MB dex$(compile_timed_out "$pkg" speed && echo ", speed timed out before")), kept at $(odex_filter "$pkg") until it has a profile"
             continue
         fi

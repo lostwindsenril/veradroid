@@ -17,8 +17,14 @@ need   "$S/ReaderActivity.java" 'preChapters = chs;' 'book read'
 need   "$S/ReaderActivity.java" 'provBookReady\(\);' 'pending turn applied once the book is read'
 # the built-in reader lives in the home package, for which the host sends FLIPCOUNT 0: it turns page counting on itself
 need   "$S/ReaderActivity.java" 'HostLink\.epd\(on \? "FLIPCOUNT 1" : "FLIPCOUNT 0"\)' 'reader turns the KFB_FLASH page count on'
-need   "$S/ReaderActivity.java" 'private void turned\(\) \{[[:space:]]*$' 'turned()'
-grep -A1 'private void turned() {' "$S/ReaderActivity.java" | grep -q 'flipCount(true);' || { echo "FAIL ReaderActivity.java: every turn re-enables page counting"; fail=1; }
+need   "$S/ReaderActivity.java" 'private void turned\(int dir\) \{[[:space:]]*$' 'turned(dir)'
+grep -A1 'private void turned(int dir) {' "$S/ReaderActivity.java" | grep -q 'flipCount(true);' || { echo "FAIL ReaderActivity.java: every turn re-enables page counting"; fail=1; }
+# 翻页动画 (fix/1105-reader-anim): a text page often changes less than the bridge's KFB_ANIM_MIN, so the reader asks for the slide
+grep -A2 'private void turned(int dir) {' "$S/ReaderActivity.java" | grep -q 'slideTurn(dir);' || { echo "FAIL ReaderActivity.java: a turn asks for the page slide"; fail=1; }
+need   "$S/ReaderActivity.java" 'turned\(-1\);' 'prev() turns backwards'
+need   "$S/ReaderActivity.java" 'turned\(1\);' 'next() turns forwards'
+need   "$S/ReaderActivity.java" 'HostLink\.epd\("SWIPE " \+ d \+ " "' 'slide sent as a bridge SWIPE one-shot'
+need   "$S/ReaderActivity.java" 'ReaderTurn\.slideDir\(HostLink\.num\(cfg, "KFB_ANIM_MODE", 0\), "0"\.equals\(cfg\.get\("KFB_SWIPE"\)\)' 'slide follows KFB_ANIM_MODE and KFB_SWIPE'
 grep -A2 'protected void onPause() {' "$S/ReaderActivity.java" | grep -q 'flipCount(false);' || { echo "FAIL ReaderActivity.java: page counting off when the reader leaves"; fail=1; }
 forbid "$S/ReaderActivity.java" 'if \(start >= provChapter\.text\.length\(\)\) return;' 'old silent return at the end of a chapter'
 if command -v javac >/dev/null 2>&1 && javac -version >/dev/null 2>&1; then

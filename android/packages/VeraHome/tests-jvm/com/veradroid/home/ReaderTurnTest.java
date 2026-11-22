@@ -36,6 +36,16 @@ public class ReaderTurnTest {
         int at = ReaderTurn.prevStart(big, Integer.MAX_VALUE, ten), k = fwd.size() - 1;
         while (at >= 0) { eq("walk back page " + k, fwd.get(k), at); at = ReaderTurn.prevStart(big, at, ten); k--; }
         eq("walked back over every page", -1, k);
+        // 翻页动画（KFB_ANIM_MODE）-> the bridge SWIPE direction (0 down 1 up 2 left 3 right)
+        eq("animation off: no swipe", -1, ReaderTurn.slideDir(0, false, 1));
+        eq("follow: next page slides left", 2, ReaderTurn.slideDir(1, false, 1));
+        eq("follow: previous page slides right", 3, ReaderTurn.slideDir(1, false, -1));
+        eq("fixed left", 2, ReaderTurn.slideDir(2, false, -1));
+        eq("fixed right", 3, ReaderTurn.slideDir(3, false, 1));
+        eq("fixed up", 1, ReaderTurn.slideDir(4, false, 1));
+        eq("fixed down", 0, ReaderTurn.slideDir(5, false, 1));
+        eq("host says no hardware swipe (KFB_SWIPE=0)", -1, ReaderTurn.slideDir(1, true, 1));
+        eq("unknown mode", -1, ReaderTurn.slideDir(9, false, 1));
         System.out.println(fail == 0 ? "ReaderTurnTest: ok" : "ReaderTurnTest: " + fail + " failed");
         System.exit(fail == 0 ? 0 : 1);
     }

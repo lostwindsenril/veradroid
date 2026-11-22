@@ -58,8 +58,19 @@ android_freeze() {
     echo FROZEN > $FZ/freezer.state
     cpu_gov_set powersave 2>/dev/null || true
     i=0; while [ "$(freezer_state)" != FROZEN ] && [ $i -lt 50 ]; do usleep 100000; i=$((i + 1)); done
-    [ "$(freezer_state)" = FROZEN ] && net_pause
-    [ "$(freezer_state)" = FROZEN ]
+    # 5 秒还停在 FREEZING（有进程在不可中断的 IO 里，比如内存紧时换页的 dex2oat）：不能就这么留着。冻住的一半（netd 等）
+    # 不回话，没冻住的 system_server 照常发命令，等 60 秒超时、再超时，最后 NativeDaemonTimeoutException 让 system_server
+    # 崩掉重启（PW5 5.16 用户诊断 2026-11-21：屏保期间 system_server 还在写日志，netd 卡了 8 分钟）。解冻回来，这次不冻，
+    # 返回失败（屏保照样画、显示桥照样挡着；机器真睡下去时整个系统一起停）。
+    fz_st=$(freezer_state)
+    if [ "$fz_st" != FROZEN ]; then
+        echo THAWED > $FZ/freezer.state 2>/dev/null
+        cpu_gov_restore 2>/dev/null || true
+        t "freeze: still ${fz_st:-unknown} after 5 s, thawed again (android left running, not half frozen)"
+        return 1
+    fi
+    net_pause
+    return 0
 }
 android_thaw() {
     rm -f $W/idlefz

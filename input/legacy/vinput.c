@@ -136,6 +136,8 @@ static void rt_setup(void)
     if (setpriority(PRIO_PROCESS, 0, -10) == 0) logf_("priority: SCHED_FIFO refused (%s), nice -10", strerror(e));
     else logf_("priority: unchanged (%s)", strerror(errno));
 }    /* gconf FAST_DRAG: a single finger that moved past the slop ends the two-finger window at once */
+static int TAP_PX = 28;       /* gconf TAP_PX: tap dead zone (px on a 1272 px wide panel, scaled), see dz_forward; 0 = off */
+static int HELD_REPLAY = 0;   /* gconf HELD_REPLAY=1: held frames replayed as read (before 0.8.14), see flush_held */
 static const char *TAPDEV = NULL;
 static int G_EDGE_SENS = 1;            /* edge swipe sensitivity: 0 low, 1 standard, 2 high (scales the strip width and the swipe distance) */
 static int EDGE_SWIPE;                 /* defined with its default further down */
@@ -182,7 +184,7 @@ static void gconf_load(void)
     gconf_sig = sig;
     G_EDGE_BACK = G_EDGE_PANEL = G_TWO_TAP = G_TWO_LONG = G_TWO_BACK = G_TWO_SLIDE = 1; G_BACK_EXCLUDE[0] = 0; G_EDGE_SENS = 1;
     G_TAP = 1; G_TAP_KEY = KEY_VOLUMEDOWN; snprintf(G_CORNERS, sizeof(G_CORNERS), "all");
-    BOOST_MS = 150; BOOST_KHZ = 0; SCROLL_PX = 20; FAST_DRAG = 1;
+    BOOST_MS = 150; BOOST_KHZ = 0; SCROLL_PX = 20; FAST_DRAG = 1; HELD_REPLAY = 0; TAP_PX = 28;
     FILE *f = !ok ? NULL : fopen(GCONF, "r");
     if (f) {
         char line[600];
@@ -200,6 +202,8 @@ static void gconf_load(void)
             else if (!strcmp(line, "BOOST_MS")) { BOOST_MS = atoi(v); if (BOOST_MS < 0 || BOOST_MS > 2000) BOOST_MS = 150; }
             else if (!strcmp(line, "BOOST_KHZ")) { BOOST_KHZ = atoi(v); if (BOOST_KHZ < 0) BOOST_KHZ = 0; }
             else if (!strcmp(line, "FAST_DRAG")) FAST_DRAG = b;
+            else if (!strcmp(line, "HELD_REPLAY")) HELD_REPLAY = b;
+            else if (!strcmp(line, "TAP_PX")) { TAP_PX = atoi(v); if (TAP_PX < 0 || TAP_PX > 200) TAP_PX = 28; }
             else if (!strcmp(line, "SCROLL_PX")) { SCROLL_PX = atoi(v); if (SCROLL_PX < 0 || SCROLL_PX > 400) SCROLL_PX = 20; }
             else if (!strcmp(line, "G_TAP_KEY")) {
                 if (!strcmp(v, "pageup")) G_TAP_KEY = KEY_PAGEUP;
@@ -458,11 +462,147 @@ static void forward(const struct input_event *e)
     fwd_count++;
     uout(e);
 }
+/* Held frames go to Android as ONE touch-down at the finger's latest position (plus one lift frame when the finger already
+   left), not replayed. uinput stamps every event with the time it is written, so a replay squeezed the first 40-60 ms of
+   the touch into well under a millisecond: a tap with 3-6 px of finger jitter reached Android as a "move" of thousands of
+   px/s, and readers that turn pages on a fling (多看 on KT6, field report 2026-11-21: "next page" went back one or two pages,
+   or nothing happened) read the tap as a swipe in whatever direction the jitter went. The movement inside the hold is at
+   most the fast-drag slop (otherwise the touch was released at once) or the edge-hold time, so nothing a gesture needs is lost.
+   HELD_REPLAY=1 in --gconf restores the old replay. Falls back to the replay when the held frames are not one clean
+   down (+ lift) per slot. */
+static unsigned long n_compact = 0;
+/* Tap dead zone (TAP_PX): after the held touch-down, a single finger's position changes are kept from Android until it
+   has moved more than TAP_PX from the touch-down point; then Android gets the current position and everything after it
+   as read. A finger that lifts inside the zone is a tap exactly where it went down. 多看's e-ink flip gesture
+   (EInkReadingFlipGesture) treats any move of more than 20 px from the touch-down as a swipe: a tap whose contact drifted
+   20+ px (the KT6 pt_mt panel reports the landing finger's centre moving as it flattens) became "swipe down" = previous
+   page, or, when it came back under 20 px by the lift, nothing at all (the tap was already taken by the swipe). */
+static int dz_on = 0, dz_slot = 0, dz_x = 0, dz_y = 0;
+static unsigned long n_dz_taps = 0, n_dz_drops = 0;
+/* at least 22 px: 多看 counts 20 raw px whatever the panel, so a scaled-down zone on a narrow panel (PW2 758 px) would be
+   smaller than its swipe threshold */
+static int dz_thr(void) { int t = TAP_PX * (PW ? PW : W) / 1272; return t < 22 ? 22 : t; }
+static void mkev_(struct input_event *e, int type, int code, int value);
+/* forward a frame (PASS / EDGE_FWD) through the dead zone */
+static void dz_forward(const struct input_event *fr, int n)
+{
+    if (!dz_on) { for (int i = 0; i < n; i++) forward(&fr[i]); return; }
+    struct slot *z = &sl[dz_slot];
+    int thr = dz_thr();
+    int lifted = !z->active;
+    int leave = !lifted && (count_active() != 1 || abs(z->x - dz_x) > thr || abs(z->y - dz_y) > thr);
+    int cs = dz_slot;
+    for (int i = 0; i < n; i++) {
+        const struct input_event *e = &fr[i];
+        if (e->type == EV_ABS && e->code == ABS_MT_SLOT) cs = e->value;
+        if (leave && e->type == EV_SYN && e->code == SYN_REPORT) {
+            /* out of the zone: Android gets where the finger really is now (both axes: a frame may carry only one) */
+            struct input_event x;
+            mkev_(&x, EV_ABS, ABS_MT_SLOT, dz_slot); forward(&x);
+            mkev_(&x, EV_ABS, ABS_MT_POSITION_X, z->x); forward(&x);
+            mkev_(&x, EV_ABS, ABS_MT_POSITION_Y, z->y); forward(&x);
+            if (src_proto == PROTO_B && cs != dz_slot) { mkev_(&x, EV_ABS, ABS_MT_SLOT, cs); forward(&x); }
+        } else if (!leave && cs == dz_slot && e->type == EV_ABS && (e->code == ABS_MT_POSITION_X || e->code == ABS_MT_POSITION_Y)) {
+            n_dz_drops++;
+            continue;
+        }
+        forward(e);
+    }
+    if (lifted) { n_dz_taps++; dz_on = 0; if (TOUCH_DEBUG) logf_("tap dead zone: lifted inside (%d px)", thr); }
+    else if (leave) { dz_on = 0; if (TOUCH_DEBUG) logf_("tap dead zone: left at %d,%d", z->x, z->y); }
+}
+static void mkev_(struct input_event *e, int type, int code, int value) { memset(e, 0, sizeof(*e)); e->type = type; e->code = code; e->value = value; }
 static void flush_held(void)
 {
     if (!nheld) return;
     if (TOUCH_DEBUG) logf_("flush %d after %ldms", nheld, now_ms() - t_down);
-    for (int i = 0; i < nheld; i++) forward(&held[i]);
+    enum { NA = ABS_MT_TOOL_Y + 1 };
+    static int tid[MAXSLOT], last[MAXSLOT][NA - ABS_MT_SLOT], has[MAXSLOT][NA - ABS_MT_SLOT], lifted[MAXSLOT], used[MAXSLOT];
+    int gabs[ABS_MT_SLOT], ghas[ABS_MT_SLOT], key[KEY_CNT > 0x2ff ? 0x2ff : KEY_CNT], khas[KEY_CNT > 0x2ff ? 0x2ff : KEY_CNT];
+    int ok = !HELD_REPLAY, s = hw_slot >= 0 && hw_slot < MAXSLOT ? hw_slot : 0, nslots = 0;
+    memset(used, 0, sizeof(used)); memset(lifted, 0, sizeof(lifted)); memset(has, 0, sizeof(has));
+    memset(ghas, 0, sizeof(ghas)); memset(khas, 0, sizeof(khas));
+    /* the slot pointer at the start of the hold: the first held frame names it (frames are normalised to name their slot) */
+    for (int i = 0; ok && i < nheld; i++) {
+        const struct input_event *e = &held[i];
+        if (e->type == EV_ABS && e->code == ABS_MT_SLOT) { if (e->value < 0 || e->value >= MAXSLOT) ok = 0; else s = e->value; }
+        else if (e->type == EV_ABS && e->code == ABS_MT_TRACKING_ID) {
+            if (e->value >= 0) { if (used[s] || out_act[s]) ok = 0; used[s] = 1; tid[s] = e->value; nslots++; }
+            else { if (!used[s] || lifted[s]) ok = 0; lifted[s] = 1; }
+        } else if (e->type == EV_ABS && e->code > ABS_MT_SLOT && e->code < NA) {
+            if (!used[s] || lifted[s]) { if (!lifted[s]) ok = 0; continue; }   /* a move after the lift: dropped */
+            last[s][e->code - ABS_MT_SLOT] = e->value; has[s][e->code - ABS_MT_SLOT] = 1;
+        } else if (e->type == EV_ABS && e->code < ABS_MT_SLOT) { gabs[e->code] = e->value; ghas[e->code] = 1; }
+        else if (e->type == EV_KEY && e->code < (int)(sizeof(key) / sizeof(key[0]))) {
+            if (!khas[e->code] || e->value) key[e->code] = e->value;   /* the down frame: a key that was pressed at all */
+            khas[e->code] = 1;
+        } else if (e->type == EV_SYN && e->code == SYN_REPORT) { }
+        else if (e->type == EV_SYN || e->type == EV_MSC) { }
+        else ok = 0;
+    }
+    /* a touch that already ended and moved more than a tap (a quick flick inside the edge hold): replayed as before,
+       a flick must stay a flick */
+    if (ok) {
+        int slop = 12 * (PW ? PW : W) / 1272; if (slop < 8) slop = 8;
+        for (int i = 0; i < MAXSLOT && ok; i++) {
+            if (!used[i] || !lifted[i]) continue;
+            int x0 = -1, y0 = -1, cs = s, seen = 0;
+            for (int k = 0; k < nheld; k++) {
+                const struct input_event *e = &held[k];
+                if (e->type == EV_ABS && e->code == ABS_MT_SLOT) cs = e->value;
+                else if (cs == i && e->type == EV_ABS && e->code == ABS_MT_TRACKING_ID) { if (e->value >= 0) seen = 1; else seen = 0; }
+                else if (cs == i && seen && e->type == EV_ABS && e->code == ABS_MT_POSITION_X) { if (x0 < 0) x0 = e->value; }
+                else if (cs == i && seen && e->type == EV_ABS && e->code == ABS_MT_POSITION_Y) { if (y0 < 0) y0 = e->value; }
+            }
+            int lx = has[i][ABS_MT_POSITION_X - ABS_MT_SLOT] ? last[i][ABS_MT_POSITION_X - ABS_MT_SLOT] : x0;
+            int ly = has[i][ABS_MT_POSITION_Y - ABS_MT_SLOT] ? last[i][ABS_MT_POSITION_Y - ABS_MT_SLOT] : y0;
+            if (x0 >= 0 && y0 >= 0 && (abs(lx - x0) > slop || abs(ly - y0) > slop)) ok = 0;
+        }
+    }
+    if (!ok || !nslots) {
+        for (int i = 0; i < nheld; i++) forward(&held[i]);
+        nheld = 0;
+        return;
+    }
+    n_compact++;
+    struct input_event e;
+    int anylift = 0;
+    for (int i = 0; i < MAXSLOT; i++) {
+        if (!used[i]) continue;
+        anylift |= lifted[i];
+        mkev_(&e, EV_ABS, ABS_MT_SLOT, i); forward(&e);
+        mkev_(&e, EV_ABS, ABS_MT_TRACKING_ID, tid[i]); forward(&e);
+        for (int c = ABS_MT_SLOT + 1; c < NA; c++)
+            if (c != ABS_MT_TRACKING_ID && has[i][c - ABS_MT_SLOT]) { mkev_(&e, EV_ABS, c, last[i][c - ABS_MT_SLOT]); forward(&e); }
+    }
+    for (int c = 0; c < ABS_MT_SLOT; c++) if (ghas[c]) { mkev_(&e, EV_ABS, c, gabs[c]); forward(&e); }
+    for (int c = 0; c < (int)(sizeof(key) / sizeof(key[0])); c++) if (khas[c] && key[c]) { mkev_(&e, EV_KEY, c, key[c]); forward(&e); }
+    if (src_proto == PROTO_B && !anylift) { mkev_(&e, EV_ABS, ABS_MT_SLOT, s); forward(&e); }
+    mkev_(&e, EV_SYN, SYN_REPORT, 0); forward(&e);
+    if (anylift) {
+        for (int i = 0; i < MAXSLOT; i++) {
+            if (!lifted[i]) continue;
+            mkev_(&e, EV_ABS, ABS_MT_SLOT, i); forward(&e);
+            mkev_(&e, EV_ABS, ABS_MT_TRACKING_ID, -1); forward(&e);
+        }
+        for (int c = 0; c < (int)(sizeof(key) / sizeof(key[0])); c++)
+            if (khas[c]) {   /* the keys' last values (BTN_TOUCH 0 after the lift) */
+                int v = 0;
+                for (int i = nheld - 1; i >= 0; i--) if (held[i].type == EV_KEY && held[i].code == c) { v = held[i].value; break; }
+                if (v != key[c] || !v) { mkev_(&e, EV_KEY, c, v); forward(&e); }
+            }
+        if (src_proto == PROTO_B) { mkev_(&e, EV_ABS, ABS_MT_SLOT, s); forward(&e); }
+        mkev_(&e, EV_SYN, SYN_REPORT, 0); forward(&e);
+    }
+    if (!anylift && nslots == 1 && TAP_PX > 0) {
+        for (int i = 0; i < MAXSLOT; i++) if (used[i]) {
+            dz_slot = i;
+            dz_x = has[i][ABS_MT_POSITION_X - ABS_MT_SLOT] ? last[i][ABS_MT_POSITION_X - ABS_MT_SLOT] : sl[i].x;
+            dz_y = has[i][ABS_MT_POSITION_Y - ABS_MT_SLOT] ? last[i][ABS_MT_POSITION_Y - ABS_MT_SLOT] : sl[i].y;
+            dz_on = 1;
+        }
+    }
+    if (TOUCH_DEBUG) logf_("flush: %d held events -> one touch-down%s", nheld, anylift ? " + lift" : "");
     nheld = 0;
 }
 /* one command line to the display bridge (never blocks: no reader = dropped) */
@@ -719,6 +859,7 @@ static void handle_frame(struct input_event *fr, int n)
 
     switch (md) {
     case IDLE:
+        dz_on = 0;
         if (active >= 1) {
             int sx = sl[cur_slot].sx >= 0 ? sl[cur_slot].sx : sl[cur_slot].x, sy = sl[cur_slot].sy >= 0 ? sl[cur_slot].sy : sl[cur_slot].y;
             gconf_load();
@@ -767,7 +908,7 @@ static void handle_frame(struct input_event *fr, int n)
         }
         break;
     case PASS: {
-        for (int i = 0; i < n; i++) forward(&fr[i]);
+        dz_forward(fr, n);
         if (active >= 2) {                  /* a second finger arriving late: let Android have it (pinch etc.) */
         }
         if (active == 0) {
@@ -831,7 +972,7 @@ static void handle_frame(struct input_event *fr, int n)
         int sy = sl[cur_slot].sy >= 0 ? sl[cur_slot].sy : sl[cur_slot].y;
         int dx = sl[cur_slot].x - sx;
         int dy = sl[cur_slot].y - sy;
-        for (int i = 0; i < n; i++) forward(&fr[i]);
+        dz_forward(fr, n);
         if (active == 0) { md = IDLE; break; }
         if (!corner_fired && ((edge_kind == EDGE_B && dy < -EDGE_SWIPE) || (edge_kind == EDGE_T && dy > EDGE_SWIPE)) && abs(dy) > abs(dx)) {
             corner_fired = 1;               /* the swipe turned out to be a gesture after all: take the touch back from Android */
@@ -864,7 +1005,7 @@ static void handle_frame(struct input_event *fr, int n)
         break;
     }
     /* scroll hint: one finger that Android is getting moved past the slop */
-    if (!scroll_sent && SCROLL_PX > 0 && active == 1 && (md == PASS || md == EDGE_FWD || md == IDLE)) {
+    if (!scroll_sent && !dz_on && SCROLL_PX > 0 && active == 1 && (md == PASS || md == EDGE_FWD || md == IDLE)) {
         int sx = sl[cur_slot].sx, sy = sl[cur_slot].sy;
         int thr = SCROLL_PX * PW / 1272;
         if (thr < 4) thr = 4;
@@ -1130,6 +1271,9 @@ static void inject_cmd(int fd)
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         int x1, y1, x2, y2, ms;
+        /* an injected finger is not in the kernel's slots: without this the stuck watchdog lifted a "down" injected more
+           than --stuck-ms after the last real panel event within one tick, and down / move / up tests never got a move */
+        last_hw_ms = now_ms();
         if (!strncmp(line, "reset", 5) && (line[5] == 0 || line[5] == ' ')) {
             touch_reset(line[5] ? line + 6 : "host");
         } else if (sscanf(line, "down %d %d", &x1, &y1) == 2) {

@@ -22,7 +22,7 @@ esac
 umask 022
 VD=${VD:-$(cd "$(dirname "$0")/.." && pwd)}
 . "$VD/boot/lib/common.sh"
-for m in settings memory memkeep slim imgclass props freeze kmod framework container input network sleep status cmd watchdog afterboot splash bootwatch diagboot compile energy idle tz; do . "$VD/boot/lib/$m.sh"; done
+for m in settings memory memkeep appslim slim imgclass props freeze kmod framework container input network sleep status cmd watchdog afterboot splash bootwatch diagboot compile energy idle tz; do . "$VD/boot/lib/$m.sh"; done
 mkdir -p $SYS $W
 # 上次停在某个应用时留下的“当前应用显示参数”不带进这一次（开机时前台是桌面；appprof.sh）。
 # 解冻（Android 冻着、还活着）时不删：显示桥一直在跑，手里还是那个应用的参数（比如微信读书的 KFB_MODE=1 / FLASH=6）。以前这里删了，
@@ -34,6 +34,12 @@ settings_load
 # 第二阶段：在新命名空间里
 if [ "$1" = "--in-ns" ]; then run_in_ns "$2" "$3" "$4"; exit 1; fi
 if [ "$1" = "--in-chroot" ]; then HOSTNS=1 run_in_ns "$2" "$3" "$4"; exit 1; fi
+# 回到 Kindle 的后备入口（action.sh exit_send：命令监听 8 秒没接走 exit）：在这个新进程里直接做 do_exit
+if [ "$1" = "--exit" ]; then
+    : >>"$LOG" 2>/dev/null && exec >>$LOG 2>&1
+    t "return to kindle: the command listener did not take exit, doing it directly (pid $$)"
+    do_exit; exit 0
+fi
 
 # 日志只留最近约 512 KB：以前从不清理，低内存机型上看门狗每 20 秒还写一行
 [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ] && { tail -c 524288 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"; }
@@ -120,6 +126,7 @@ log_reopen() { if [ ! -f "$SYSTEM_IMG" ] || grep -q " $SYS " /proc/mounts; then 
 open_app() { echo "$APP" > $X/ctl/app.tmp && mv -f $X/ctl/app.tmp $X/ctl/app; t "open: $APP"; }
 
 start_helpers() {
+    rm -rf $W/exiting $W/exit.ack     # 上一次回到 Kindle 的锁（do_exit）：解冻 / 重新开始后不再算数
     kill $(cat $W/cmd.pid 2>/dev/null) 2>/dev/null   # 上次留下的命令监听（冻结期间还活着）
     watchdog &
     echo $! > $W/watchdog.pid
@@ -143,6 +150,7 @@ start_helpers() {
         ( cd / && exec $VD/bin/vdshutwatch env VD=$VD sh $W/stop-shutdown.sh --shutdown ) </dev/null >>$W/shutw.log 2>&1 &
         echo $! > $W/shutw.pid
     fi
+    host_oom_protect      # watchdog.sh：宿主进程不让 lowmemorykiller 挑中
 }
 
 # 书库入口“VeraDroid 启动”不见了（误删；这次是从 KUAL / 备用入口点进来的）：每次启动都补回去（framework.sh 的 launcher_restore，
@@ -151,6 +159,35 @@ type launcher_restore >/dev/null 2>&1 && launcher_restore
 type vd_where_notes >/dev/null 2>&1 && vd_where_notes
 
 P=$(cat $W/pid 2>/dev/null)
+# 社区（KPW6 KUAL 越狱）：“不时出 bug 之后点启动就进不去系统，只能用更新脚本进”。更新脚本能进是因为它先完整 stop.sh、再冷启动；
+# 而“启动”看到 Android 还在（冻着或在跑）就只解冻 / 打开应用——那个 Android 要是已经坏了（system_server / surfaceflinger 没了、
+# 容器 init 早就退出而 pid 号被别的进程用了），解冻出来还是坏的，怎么点都一样。现在先看一眼：坏了就和更新脚本一样完整停掉再冷启动。
+android_unusable() { # 输出原因；能用时什么都不输出
+    au_c=$(cat /proc/$P/comm 2>/dev/null)
+    [ "$au_c" = init ] || { echo "pid $P is '$au_c', not the container's init"; return 0; }
+    [ -f $W/booted ] || return 0                   # 还在开机：不判断
+    au_l=$(cat $FZ/cgroup.procs 2>/dev/null); [ -n "$au_l" ] || au_l=$(ns_pids 2>/dev/null)
+    [ -n "$au_l" ] || return 0
+    au_ss=; au_sf=
+    for au_p in $au_l; do
+        case "$(cat /proc/$au_p/comm 2>/dev/null)" in system_server) au_ss=1 ;; surfaceflinger) au_sf=1 ;; esac
+    done
+    [ -n "$au_ss" ] || echo "system_server is gone"
+    [ -n "$au_sf" ] || echo "surfaceflinger is gone"
+    return 0
+}
+if [ -n "$P" ] && kill -0 $P 2>/dev/null && ! { [ -d $W/starting ] && vd_lock_alive "$(cat $W/starting/pid 2>/dev/null)"; }; then
+    au_why=$(android_unusable | tr '\n' ';')
+    if [ -n "$au_why" ]; then
+        t "android (pid $P) is not usable ($au_why): stopping it completely and starting again (like the installer does)"
+        vd_slog "android was not usable ($au_why): full stop + cold start"
+        splash "VeraDroid 上次运行出了问题，正在重新启动…" 36 || eips 1 2 "VeraDroid: restarting after a problem" >/dev/null 2>&1
+        exec >>/tmp/veradroid-stop.log 2>&1
+        VD_STOP_REASON="start: android not usable ($au_why)" sh $VD/boot/stop.sh >/dev/null 2>&1
+        storage_mount; log_reopen
+        P=
+    fi
+fi
 if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
     if [ -f $W/frozen ]; then
         # 解冻也只允许一个流程：冻结时连点两次“启动”，以前会起两套看门狗 / 休眠监视，还可能把 core_pattern 的原值盖掉
@@ -169,12 +206,17 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         touch $X/ctl/sleep
         input_grab
         android_thaw
+        # 显示桥 / 触摸前端每次开机最多自动重启 3 次（watchdog.sh）：开着几天的 Android 用完了次数，屏幕就永远停住。解冻时重新计数，
+        # 显示桥没了马上拉起来（不等看门狗的下一轮）
+        rm -f $W/epd.restarts $W/input.restarts
+        [ -x "$VD/bin/veradroid-epd" ] && ! alive $W/epd.pid && { t "thaw: display bridge was gone, starting it"; display_start; }
         type lock_reset_check >/dev/null 2>&1 && lock_reset_check
         rm -f $W/frozen
         ( sleep 1; rm -f $X/ctl/sleep; epd_send REDRAW ) &
         start_helpers
         # 冻结期间 Kindle 上改了时区 / 12、24 小时制：告诉 Android（tz.sh，没变就什么都不做）
         ( sleep 3; tz_sync_live; time_format_apply ) </dev/null >>$LOG 2>&1 &
+        type net_heal_kick >/dev/null 2>&1 && net_heal_kick thaw   # 冻着的时候 Kindle 的网络可能变了（network.sh）
         t "thawed"
     fi
     # Android 活着、没冻结，Kindle 界面却没有暂停（$FWD/paused 不在）：只可能是上一次退出 / 启动互相踩了（旧版本里 stop.sh 还没跑完
@@ -271,6 +313,7 @@ props_apply
 readahead_on
 loopdio_on
 net_setup
+netd_hostnet_fix   # chroot：换上不会在 wlan0 断开时卡死的 netd（network.sh）
 boot_mark_setup
 container_start || { exec >>/tmp/veradroid-stop.log 2>&1; sh $VD/boot/stop.sh >/dev/null 2>&1; vd_notice "VeraDroid：系统没能启动（容器起不来），已回到 Kindle" "VeraDroid: Android could not be started, back to Kindle"; exit 1; }
 bat_baseline       # 电量统计起点（energy.sh）

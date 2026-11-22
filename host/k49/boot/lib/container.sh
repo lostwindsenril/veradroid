@@ -100,7 +100,7 @@ display_start() {
     [ -x "$VD/bin/veradroid-epd" ] || { t "display: veradroid-epd missing"; return 0; }
     epd_pd=-1; case "$KFB_PWRDOWN" in ""|*[!0-9]*) ;; *) epd_pd=$KFB_PWRDOWN ;; esac   # 面板掉电延时，没设 / off = 不碰
     : > $W/epd.log   # 追加方式打开：watchdog 的 log_cap 截短它时，显示桥接着写在新的末尾（不会留下空洞）
-    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --pace ${KFB_PACE:-0} --clean ${KFB_CLEAN:-0} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --gcn ${KFB_GCN:-0} --mono ${KFB_MONO:-0} --max-defer ${KFB_MAXDEFER:-1200} --flip-input ${KFB_FLIPINPUT:-1000} --reagl-min ${KFB_REAGL_MIN:-35} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --pwrdown $epd_pd --rt ${EPD_RT:-0} $(rot_args) >>$W/epd.log 2>&1 &
+    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --pace ${KFB_PACE:-0} --clean ${KFB_CLEAN:-0} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --gcn ${KFB_GCN:-0} --mono ${KFB_MONO:-0} --max-defer ${KFB_MAXDEFER:-1200} --flip-input ${KFB_FLIPINPUT:-1000} --reagl-min ${KFB_REAGL_MIN:-35} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --swipe ${KFB_SWIPE:-1} --pwrdown $epd_pd --rt ${EPD_RT:-0} $(rot_args) >>$W/epd.log 2>&1 &
     echo $! > $W/epd.pid
     rot_deg > $W/rotate
     # 以后能不能当场转 180：0 度启动时没传 --vw，可见宽 != 行宽（PW5 无 FBInk）的机器转了会偏 12 像素，只能重启
@@ -507,6 +507,9 @@ webview_cmd() {   # webview get | cancel
     esac
 }
 container_start() {
+    # Android 本身按原来的 0 起：重启可能是从命令监听 / 看门狗里发起的，它们已经是 -800（host_oom_protect），
+    # 不能让 Android 的原生进程（installd 起的 dex2oat 等）也继承成“不能杀”
+    echo 0 > /proc/self/oom_score_adj 2>/dev/null
     webview_prepare       # 网页内核（WEBVIEW=alt，run_in_ns 绑进去）
     alarmfix_prepare      # AlarmManager 的 timerfd（run_in_ns 绑进去）
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
@@ -514,9 +517,13 @@ container_start() {
     docs_snapshot         # 开机完成后 after_boot 拿它核对 Kindle 书库（docs_verify）
     wc -l < $SYS/data/system/uiderrors.txt 2>/dev/null | tr -d ' ' > $W/uiderr.lines
     if hostns; then
-        freezer_setup
+        # chroot 模式同样要先进 freezer 组再 fork：以前这里只 freezer_setup，Android 的进程一个都不在组里，屏保 / 返回 Kindle 时
+        # “冻结”的是一个空组（日志照样写 android frozen），Android 在屏保期间一直在跑（pw5-516211 模拟器：vd/cgroup.procs 为空，
+        # system_server 的 freezer 组是 /）。没有 freezer 的内核 freezer_enter 什么都不做（信号模式按 chroot_pids 发 SIGSTOP）。
+        freezer_setup && freezer_enter
         setsid sh $VD/boot/veradroid.sh --in-chroot "$KFB_TOUCH" "$KFB_KEYS_VIRT" "$KFB_KEYS" </dev/null >>$LOG 2>&1 &
         P=$!                                      # exec 链（sh -> chroot -> /init）保持同一个 PID
+        [ -d $FZ ] && freezer_leave
         echo $P > $W/pid
         echo chroot > $W/mode
         t "container started (host namespaces, chroot): init=$P"

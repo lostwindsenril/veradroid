@@ -35,6 +35,8 @@ status_write() {
         # （PW6 普通版实测没有传感器：flAuto 属性在，但没有任何这类设备。签名版 / Scribe 没有真机验证过。）
         fla=$(lipc-get-prop $p flAuto 2>/dev/null); als=
         ls /sys/bus/iio/devices/*/in_illuminance* >/dev/null 2>&1 && als=1
+        # powerd 自己的读数：alsLux >= 0 = 有传感器（没有传感器时是 -1，PW5 5.16.2 模拟器实测）
+        [ -z "$als" ] && ls_l=$(lipc-get-prop $p alsLux 2>/dev/null) && [ "$ls_l" -ge 0 ] 2>/dev/null && als=1
         [ -z "$als" ] && cat /sys/class/input/*/device/name /sys/class/sensors/*/name /sys/bus/iio/devices/*/name 2>/dev/null | grep -qiE "(^|[^a-z])(als|lux|light)" && als=1
         if [ -n "$fla" ] && [ -n "$als" ]; then echo "haslightauto=1"; echo "lightauto=$fla"; else echo "haslightauto=0"; fi
         # 蓝牙翻页器桥（bt.sh）：bt=1 桥在跑，btdev=当前接管的设备

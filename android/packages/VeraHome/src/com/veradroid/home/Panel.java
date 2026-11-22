@@ -228,6 +228,8 @@ final class Panel {
         HostLink.cmd("status");   // 只是请宿主把状态文件写新（电量、亮度），不改任何设置
         handler.removeCallbacks(recheck);
         handler.postDelayed(recheck, 700);
+        // 宿主写状态文件要读十来个 lipc 属性，慢的机器上（KT6 模拟器）超过 700 ms：再看一次，不然亮度条要到下次打开才出来
+        handler.postDelayed(recheck, 2500);
     }
 
     /** 收起：窗口留着，只是不可见；趁这时换回第一屏，下次出来第一帧就是对的。 */

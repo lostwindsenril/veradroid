@@ -484,7 +484,7 @@ public class ReaderActivity extends Activity {
     // ------------------------------------------------------------------ turning
 
     private void prev() {
-        turned();
+        turned(-1);
         if (isPdf) {
             if (page > 0) { page--; readPages++; showPdf(page); }
         } else if (pages.isEmpty() && provChapter != null) {
@@ -526,7 +526,7 @@ public class ReaderActivity extends Activity {
     }
 
     private void next() {
-        turned();
+        turned(1);
         if (isPdf) {
             if (page < pdfPages - 1) { page++; readPages++; showPdf(page); }
         } else if (pages.isEmpty() && provChapter != null && !ReaderTurn.chapterHasMore(provChapter.text, provEnd)) {
@@ -735,9 +735,23 @@ public class ReaderActivity extends Activity {
      */
     private void flipCount(boolean on) { HostLink.epd(on ? "FLIPCOUNT 1" : "FLIPCOUNT 0"); }
 
-    /** 每翻一页调一次：跳转后读了 BACK_KEEP_TURNS 页，“返回”就收起。 */
-    private void turned() {
+    /**
+     * 翻页动画（模式里的开关 = 宿主的 KFB_ANIM_MODE，全局）。显示桥只在“变化面积超过 KFB_ANIM_MIN（45%）”时才让控制器滑动；
+     * 阅读器的一页字只有字形变了，行距大的页、章尾半页、标题页常常不到这个比例，所以开关打开也看不出区别（PW5 用户反馈“没效果”）。
+     * 阅读器知道这一下就是翻页：开着动画时直接请显示桥把下一次变化滑进来（SWIPE 一次性，方向按翻页方向，步数用 KFB_ANIM_STEPS）。
+     * 关着、或者宿主说这台机器不用硬件滑动（KFB_SWIPE=0，Kindle 2024）时什么都不发。
+     */
+    private void slideTurn(int dir) {
+        java.util.Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
+        int d = ReaderTurn.slideDir(HostLink.num(cfg, "KFB_ANIM_MODE", 0), "0".equals(cfg.get("KFB_SWIPE")), dir);
+        if (d < 0) return;
+        HostLink.epd("SWIPE " + d + " " + Math.max(1, Math.min(30, HostLink.num(cfg, "KFB_ANIM_STEPS", 12))));
+    }
+
+    /** 每翻一页调一次（dir 1 下一页 / -1 上一页）：跳转后读了 BACK_KEEP_TURNS 页，“返回”就收起。 */
+    private void turned(int dir) {
         flipCount(true);
+        slideTurn(dir);
         if (backStack.isEmpty()) return;
         if (++turnsSinceJump >= BACK_KEEP_TURNS) { backStack.clear(); paintBackChip(); }
     }
@@ -2298,7 +2312,7 @@ public class ReaderActivity extends Activity {
         sheetRow("反色（夜间）", "Invert", new Blocks.Switch(this, "1".equals(cfg.get("KFB_INVERT")), new Icons.Toggle.Listener() {
             @Override public void onToggle(boolean on) { HostLink.settings("KFB_INVERT=" + (on ? 1 : 0) + "\n"); } }));
         final String anim = cfg.get("KFB_ANIM_MODE");
-        sheetRow("翻页动画", "Page animation", new Blocks.Switch(this, anim == null || !"0".equals(anim), new Icons.Toggle.Listener() {
+        sheetRow("翻页动画", "Page slide · all apps", new Blocks.Switch(this, anim == null || !"0".equals(anim), new Icons.Toggle.Listener() {
             @Override public void onToggle(boolean on) { HostLink.settings("KFB_ANIM_MODE=" + (on ? 1 : 0) + "\n"); } }));
         sheetRow("点按翻页", "Tap zones", new Blocks.Stepper(this, TAP_L, tapMode, new Blocks.Stepper.Listener() {
             @Override public void onStep(int i) { tapMode = i; saveStyle(); } }).wrap());

@@ -177,6 +177,7 @@ vp_eips_all() {
 }
 vp_ascii() { printf '%s' "$1" | head -1 | sed 's/剩余/left/g; s/已用/elapsed/g; s/·/|/g; s/速度/speed/g; s/正常/ok/g; s/很慢/slow/g; s/一般要/usually/g; s/左右//g' | tr -cd ' -~' | sed 's/  */ /g'; }
 vp_en_err() {
+    case "$1" in 11|12|13) [ -n "${NC_EN:-}" ] && { echo "$NC_EN"; return 0; } ;; esac   # vp_netcheck 说得更具体
     case "$1" in
         11) echo "No Wi-Fi. Connect in Kindle settings, then tap install again." ;;
         12) echo "Wi-Fi is on but no internet (DNS failed). Network problem." ;;
@@ -352,20 +353,20 @@ vp_error() { # code 标题 说明（可多行）
 # vp_netcheck <服务器根地址>：设 NC_WIFI NC_DNS NC_SRV（ok|fail|skip）、NC_CODE（失败时的代码）、NC_LINES（给人看的几行）
 vp_netcheck() {
     u=$1; host=${u#*://}; host=${host%%/*}; host=${host%%:*}
-    NC_WIFI=fail; NC_DNS=skip; NC_SRV=fail; NC_CODE=0; NC_LINES=; NC_MSG=
+    NC_WIFI=fail; NC_DNS=skip; NC_SRV=fail; NC_CODE=0; NC_LINES=; NC_MSG=; NC_EN=
     rt=$(awk '$2 == "00000000" && $1 != "lo" {print $1; exit}' /proc/net/route 2>/dev/null)
     ip_=
     [ -n "$rt" ] && ip_=$(ip -4 addr show "$rt" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
     cm=$(lipc-get-prop com.lab126.wifid cmState 2>/dev/null || true)
     if [ -n "$rt" ]; then NC_WIFI=ok; NC_LINES="■ Wi-Fi 已连接（${rt}${ip_:+ $ip_}）"
-    else NC_LINES="□ Wi-Fi 没有连上${cm:+（$cm）}"; NC_CODE=11; NC_MSG="没连 Wi-Fi：请在 Kindle 的设置里连上 Wi-Fi 再试"; return 1; fi
+    else NC_LINES="□ Wi-Fi 没有连上${cm:+（$cm）}"; NC_CODE=11; NC_MSG="没连 Wi-Fi：请在 Kindle 的设置里连上 Wi-Fi 再试"; NC_EN="No Wi-Fi. Connect Wi-Fi, tap again."; return 1; fi
     w=$(curl_do -sS -o /dev/null -I --connect-timeout 10 --max-time 20 -w '%{time_namelookup} %{time_connect} %{time_appconnect} %{http_code}' "$u/" 2>/dev/null) && rc=0 || rc=$?
     set -- $w; hc=${4:-000}
     tn=$(awk -v t="${1:-0}" 'BEGIN { printf "%.2f", t }'); tc=$(awk -v t="${2:-0}" 'BEGIN { printf "%.2f", t }'); ta=$(awk -v t="${3:-0}" 'BEGIN { printf "%.2f", t }')
     case "$host" in *[!0-9.]*) dnsok=1 ;; *) dnsok=ip ;; esac
     if [ "$rc" = 6 ]; then
         NC_DNS=fail; NC_LINES="$NC_LINES
-□ 域名解析失败：$host"; NC_CODE=12; NC_MSG="Wi-Fi 连上了，但上不了网（域名解析失败）：换个 Wi-Fi，或在 network.conf 里设 VD_DNS / VD_IP"; return 1
+□ 域名解析失败：$host"; NC_CODE=12; NC_MSG="Wi-Fi 连上了，但上不了网（域名解析失败）：换个 Wi-Fi，或在 network.conf 里设 VD_DNS / VD_IP"; NC_EN="DNS failed for $host. Try another Wi-Fi."; return 1
     fi
     if [ "$dnsok" = ip ]; then NC_DNS=skip; NC_LINES="$NC_LINES
 ■ 域名解析：不需要（直接用 IP）"
@@ -377,13 +378,36 @@ vp_netcheck() {
 ■ 服务器能连上（${t_} 秒）"; return 0
     fi
     NC_SRV=fail; NC_CODE=13
+    # 说清楚卡在哪一步（Scribe 用户只看到“网络不行”）：连接被拒 / 连接超时 / TLS 握手卡住或失败（Kindle 时间不对时证书全部无效）/ 太慢。
+    # NC_OZ = 这台机器该用的离线整包（按内核，和 VeraDroid-Offline.sh 的规则一样），NC_EN = 给 eips 的英文一句
+    case "$(uname -r)" in 3.*|4.1.*) NC_OZ=VeraDroid-Offline-Legacy.zip ;; 4.*) NC_OZ=VeraDroid-Offline-Experimental.zip ;; *) NC_OZ=VeraDroid-Offline.zip ;; esac
+    off="换个网络，或改用离线整包 $NC_OZ（官网下载，电脑拷进 documents）"
     case "$rc" in
-        28) NC_LINES="$NC_LINES
-□ 服务器 20 秒没有回应"; NC_MSG="连不上 VeraDroid 服务器（超时：网络太慢，或者被拦了）。不是机器的问题：换个网络，或改用离线整包" ;;
+        28) if [ "$tc" != 0.00 ] && [ "$ta" = 0.00 ] && [ "$dnsok" = 1 ]; then
+                NC_LINES="$NC_LINES
+□ 连上了服务器（${tc} 秒），但安全连接（TLS）握手 20 秒没完成"; NC_MSG="HTTPS 握手卡住（常见于网络干扰 HTTPS）。不是机器的问题：$off"; NC_EN="TLS handshake stalled (HTTPS blocked?). Use $NC_OZ"
+            elif [ "$tc" = 0.00 ]; then
+                NC_LINES="$NC_LINES
+□ 服务器 10 秒连不上（连接超时）"; NC_MSG="连不上 VeraDroid 服务器（连接超时：被拦了或网络太差）。不是机器的问题：$off"; NC_EN="Connect timed out (blocked?). Use $NC_OZ"
+            else
+                NC_LINES="$NC_LINES
+□ 服务器 20 秒没有回应（网络太慢）"; NC_MSG="网络太慢，服务器 20 秒没有回应。不是机器的问题：$off"; NC_EN="Network too slow. Use $NC_OZ"
+            fi ;;
+        7) NC_LINES="$NC_LINES
+□ 连接被拒绝 / 被拦截（curl 7）"; NC_MSG="连不上 VeraDroid 服务器（连接被拒绝或被拦截）。不是机器的问题：$off"; NC_EN="Connection refused/blocked. Use $NC_OZ" ;;
+        35|51|53|54|58|59|60|64|66|77|80|83|90|91)
+            yr=$(date +%Y 2>/dev/null)
+            if [ "${yr:-2026}" -lt 2025 ] 2>/dev/null; then
+                NC_LINES="$NC_LINES
+□ 安全连接（TLS）失败：Kindle 的时间不对（$(date '+%Y-%m-%d')）"; NC_MSG="Kindle 的日期时间不对，HTTPS 证书全部校验失败：在 Kindle 设置里改对日期时间，再点一次"; NC_EN="Kindle clock wrong ($(date +%F)): fix date/time"
+            else
+                NC_LINES="$NC_LINES
+□ 安全连接（TLS）失败（curl $rc）"; NC_MSG="HTTPS 连接失败（网络在拦截或篡改 HTTPS）。不是机器的问题：$off"; NC_EN="TLS/HTTPS failed (curl $rc). Use $NC_OZ"
+            fi ;;
         0) NC_LINES="$NC_LINES
-□ 服务器在维护（HTTP $hc）"; NC_MSG="VeraDroid 服务器暂时不可用（HTTP $hc）：过一会儿再试，或改用离线整包" ;;
+□ 服务器在维护（HTTP $hc）"; NC_MSG="VeraDroid 服务器暂时不可用（HTTP $hc）：过一会儿再试，或改用离线整包 $NC_OZ"; NC_EN="Server unavailable (HTTP $hc). Retry later" ;;
         *) NC_LINES="$NC_LINES
-□ 连不上服务器（curl $rc）"; NC_MSG="连不上 VeraDroid 服务器（可能被墙或服务器维护）。不是机器的问题：换个网络，或改用离线整包" ;;
+□ 连不上服务器（curl $rc）"; NC_MSG="连不上 VeraDroid 服务器（可能被墙或服务器维护）。不是机器的问题：$off"; NC_EN="Cannot reach server (curl $rc). Use $NC_OZ" ;;
     esac
     return 1
 }

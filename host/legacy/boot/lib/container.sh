@@ -283,15 +283,22 @@ nocap_mount() {        # 容器里（run_in_ns），/dev 的 tmpfs 建好之后�
     return 0
 }
 container_start() {
+    # Android 本身按原来的 0 起：重启可能是从命令监听 / 看门狗里发起的，它们已经是 -800（host_oom_protect），
+    # 不能让 Android 的原生进程（installd 起的 dex2oat 等）也继承成“不能杀”
+    echo 0 > /proc/self/oom_score_adj 2>/dev/null
     alarmfix_prepare      # AlarmManager 的 timerfd（run_in_ns 绑进去）
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
     fstrim_defuse
     docs_snapshot         # 开机完成后 after_boot 拿它核对 Kindle 书库（docs_verify）
     wc -l < $SYS/data/system/uiderrors.txt 2>/dev/null | tr -d ' ' > $W/uiderr.lines
     if hostns; then
-        freezer_setup
+        # 先进 freezer 组再 fork（port of c1f3b033）：以前只 freezer_setup，内核有 cgroup freezer 时“冻结”的是一个空组、Android 在屏保里
+        # 照跑。现在的老机型内核（3.0 没有 cgroup、4.1 没有 freezer）都是信号模式（按 chroot_pids 发 SIGSTOP），freezer_enter 不做事；
+        # 以后哪个固件的内核带了 freezer，这里就不会再漏。
+        freezer_setup && freezer_enter
         setsid unshare -m sh $VD/boot/veradroid.sh --in-chroot "$KFB_TOUCH" "$KFB_KEYS_VIRT" "$KFB_KEYS" </dev/null >>$LOG 2>&1 &
         P=$!                                      # exec 链（unshare -> sh -> pivot_init -> /init）保持同一个 PID
+        [ -d $FZ ] && freezer_leave
         echo $P > $W/pid
         echo chroot > $W/mode
         t "container started (mount namespace only, no pid namespace): init=$P"

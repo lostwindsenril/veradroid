@@ -99,6 +99,8 @@ case "$(cat $W/fwd.id 2>/dev/null)" in ipt:*) iptables -D INPUT -i "$(cut -d: -f
 [ -f $W/adbfwd.ipt ] && iptables -D INPUT -i "$(cut -d: -f2 $W/adbfwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/adbfwd.ipt)" -j ACCEPT 2>/dev/null   # 无线调试（webadmin.sh）
 rm -f $W/adbfwd.ipt $W/adbfwd.id $W/adb.until $X/ctl/adb.on $SYS/data/misc/adb/adb_keys 2>/dev/null
 [ -f $W/fwd.ipt ] && iptables -D INPUT -i "$(cut -d: -f2 $W/fwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/fwd.ipt)" -j ACCEPT 2>/dev/null
+kill $(cat $W/netheal.pid 2>/dev/null) 2>/dev/null
+rm -f $W/netheal.pid $W/net.sig $W/net.last $W/resolv.new
 rm -f $W/fwd.id $W/fwd.ipt $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
 
 # chroot 模式（3.0 内核，没有命名空间）：容器进程不会随 init 一起消失，按根目录逐个杀；

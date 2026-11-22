@@ -30,7 +30,7 @@ for h in pw6 k49; do
     grep -q '^    lowmem_ram || ZRAM_MB=768' host/$h/boot/lib/settings.sh || fail "$h: 1 GB default zram is not 768"
 done
 M=host/pw6/boot/lib/memkeep.sh
-grep -q '"2048:0 3072:100 4096:200 5120:300 6144:900 8192:906"' $M || fail "512 MB lmkd table changed"
+grep -q '"2048:0 3072:100 4096:200 8192:300 14336:900 16384:906"' $M || fail "512 MB lmkd table changed"
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT
 mkdir -p $T/w
@@ -63,7 +63,7 @@ out=$(W=$T/w sh -c '
 expect() { printf '%s\n' "$out" | grep -qxF "$1" || fail "expected '$1' in:
 $out"; }
 expect "A 6144:0 8192:100 10240:200 12288:300 20480:900 24576:906"
-expect "B 2048:0 3072:100 4096:200 5120:300 6144:900 8192:906"
+expect "B 2048:0 3072:100 4096:200 8192:300 14336:900 16384:906"
 expect "C stock"
 expect "D 4096:0 8192:906"
 expect "E bad"

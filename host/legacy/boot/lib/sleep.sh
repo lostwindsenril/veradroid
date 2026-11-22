@@ -123,13 +123,14 @@ sleep_watch() {
                         sec=$(date +%S); sec=${sec#0}
                         [ "${sec:-0}" -lt 12 ] && sleep $((12 - sec))
                     fi
-                    android_freeze && touch $W/saver_frozen
+                    # 冻不住（android_freeze 已经解冻回来）：当作没冻，醒来时不用解冻
+                    if android_freeze; then touch $W/saver_frozen; else touch $W/saver_nofreeze; fi
                 fi
                 type wifi_ps_restore >/dev/null 2>&1 && wifi_ps_restore
                 [ "${sv:-0}" = 1 ] || screensaver_show
                 cur=saver
                 date +%s > $W/saver.t0      # 醒来时看冻了多久（SAVER_EXIT_H，freeze.sh saver_exit_check）
-                t "screensaver on, android frozen ($(awk -v a=$sw0 -v b=$(cut -d' ' -f1 /proc/uptime) 'BEGIN{printf "%.1f", b-a}') s after powerd went to $st)"
+                t "screensaver on, android $([ -f $W/saver_frozen ] && echo frozen || echo 'left running') ($(awk -v a=$sw0 -v b=$(cut -d' ' -f1 /proc/uptime) 'BEGIN{printf "%.1f", b-a}') s after powerd went to $st)"
                 type tset >/dev/null 2>&1 && [ -f $W/saver_frozen ] && tset sleep.ok "$(date +%H:%M:%S)"
             fi ;;
         active|charging)
@@ -144,6 +145,8 @@ sleep_watch() {
                 rm -f $X/ctl/sleep
                 epd_send REDRAW
                 t "screensaver off, android thawed"
+                # 休眠期间 Wi-Fi 断过、重连（可能换了地址 / DNS）：等 Kindle 连上后从 Android 里查一次，不通就修（network.sh）
+                type net_heal_kick >/dev/null 2>&1 && net_heal_kick resume
                 type tset >/dev/null 2>&1 && [ -n "$(tget sleep.ok)" ] && { tset wake.ok "$(date +%H:%M:%S)"; test_report; }
             fi
             cur=active ;;

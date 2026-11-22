@@ -29,6 +29,9 @@ diag_save() {
         dsl=/mnt/base-us/veradroid/logs/$f.log; [ -f "$dsl" ] || dsl=/mnt/base-us/veradroid-$f.log   # root-legacy
         [ -f "$dsl" ] && tail -c 65536 "$dsl" | tr '\r' '\n' | grep -av '下载中' > "$d/veradroid-$f.log" 2>/dev/null
     done
+    # 启动失败的原因（书库 / KUAL 每点一次记一行，vd_notice 的原因）和停止时的自检
+    tail -c 65536 /mnt/base-us/veradroid/logs/start.log > $d/start.log 2>/dev/null
+    tail -c 32768 $VD/last-stop.log > $d/last-stop.log 2>/dev/null
     ls -la $VD/apps $VD/update 2>/dev/null > $d/kindle-apps-folder.txt
     # Full host-side picture, not a 300-line tail.
     dmesg > $d/kindle-dmesg.txt 2>/dev/null
@@ -41,6 +44,10 @@ diag_save() {
     ps > $d/kindle-ps.txt 2>/dev/null
     df -h > $d/kindle-df.txt 2>/dev/null
     free > $d/kindle-free.txt 2>/dev/null
+    # 前光：powerd 的亮度 / 自动亮度 / 传感器读数、sysfs 实际值、桌面看到的状态（“调亮度没反应”时要看）
+    { for fl_k in flIntensity flMaxIntensity flRawIntensity flAuto alsLux currentAmberLevel; do echo "$fl_k=$(lipc-get-prop com.lab126.powerd $fl_k 2>&1)"; done
+      for fl_d in /sys/class/backlight/*; do [ -d "$fl_d" ] && echo "${fl_d##*/}: brightness=$(cat $fl_d/brightness 2>/dev/null) actual=$(cat $fl_d/actual_brightness 2>/dev/null) max=$(cat $fl_d/max_brightness 2>/dev/null)"; done
+      echo "-- ctl/status"; cat $X/ctl/status 2>/dev/null; } > $d/kindle-frontlight.txt 2>&1
     for f in version cmdline cpuinfo partitions filesystems modules devices buddyinfo vmstat zoneinfo slabinfo pagetypeinfo softirqs locks keys; do
         cat /proc/$f > $d/kindle-proc-$f.txt 2>/dev/null
     done
@@ -113,6 +120,14 @@ diag_save() {
 
 # 返回 Kindle：RETURN_MODE=freeze 时冻结留在内存（再打开几秒），否则关掉。在哪个辅助进程里调都行，调完结束该进程。
 do_exit() {
+    touch $W/exit.ack 2>/dev/null       # action.sh exit_send：命令监听接到了
+    # 同一时间只做一次（命令监听晚到的 exit 和 action.sh 的后备 --exit 可能都来）：锁里记着 pid，那个进程还在就不做
+    read -r de_me _ < /proc/self/stat
+    if ! mkdir $W/exiting 2>/dev/null; then
+        de_p=$(cat $W/exiting/pid 2>/dev/null)
+        if [ -n "$de_p" ] && [ "$de_p" != "$de_me" ] && grep -q "veradroid.sh" /proc/$de_p/cmdline 2>/dev/null; then t "return to kindle already in progress (pid $de_p)"; exit 0; fi
+    fi
+    echo "$de_me" > $W/exiting/pid
     settings_load
     t "return to kindle requested"
     if [ "$RETURN_MODE" = freeze ] && [ -d $FZ ]; then
@@ -223,6 +238,31 @@ wd_guard() {
         echo $! > $W/watchdog.pid
     done
 }
+# 电量同步（port of 86f2394）：nocap_mount 去掉 healthd 的 CAP_WAKE_ALARM 以后它建不起周期定时器（timerfd CLOCK_BOOTTIME_ALARM，
+# 没有 CAP_WAKE_ALARM 就 EPERM），Android 的电量只在驱动偶尔发的电池 uevent 时更新：应用里的状态栏、桌面的电量停在几小时前。
+# 没冻结时每 BAT_POKE_S 秒（默认 60）、刚解冻后的第一轮，给电池写一条 change uevent，healthd 照常重读并广播；
+# 不用定时器、不挂唤醒源，冻结时不发（休眠不受影响）。
+bat_poke_tick() {
+    bp_now=$(cut -d. -f1 ${BAT_UPTIME:-/proc/uptime})
+    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-60} ] || return 0
+    BAT_POKE_T=$bp_now
+    for bp_d in ${BAT_PS_DIR:-/sys/class/power_supply}/*; do
+        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] && echo change > $bp_d/uevent 2>/dev/null
+    done
+    return 0
+}
+# 宿主自己的进程不让内核的 lowmemorykiller 挑中（port of 70b67b0c）。它们是从 veradroid.sh 继承的 oom_score_adj 0，和 Android
+# 前台应用同一档：512 MB 机型换页卡死时内核按“同一档里最大的”挑，命令监听 / 触摸前端 / 显示桥 / 看门狗被杀，就只剩强制重启。
+# 都很小（合计几 MB），给 -800。启动 / 解冻时（start_helpers）和看门狗每一轮各做一次。HOST_OOM_ADJ= 空 关掉。
+host_oom_protect() {
+    [ -n "${HOST_OOM_ADJ--800}" ] || return 0
+    for ho_n in cmd watchdog guard sleep input epd slirp vdkaf shutw; do
+        ho_p=$(cat $W/$ho_n.pid 2>/dev/null)
+        case "$ho_p" in ''|*[!0-9]*) continue ;; esac
+        [ "$(cat /proc/$ho_p/oom_score_adj 2>/dev/null)" = "${HOST_OOM_ADJ--800}" ] || echo "${HOST_OOM_ADJ--800}" > /proc/$ho_p/oom_score_adj 2>/dev/null
+    done
+    return 0
+}
 watchdog() {
     # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
     # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).
@@ -231,7 +271,8 @@ watchdog() {
         sleep $sleep_for
         kill -0 $P 2>/dev/null || { t "system exited"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; break; }
         lmk_kernel_tune 2>/dev/null || true
-        var_guard
+        host_oom_protect
+        var_guard; pm_pending_guard
         log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ]; then
             # 命令监听没了（FIFO 建不起来、被杀）：桌面的“返回 Kindle”、设置、手势全都没反应，只能重启 Kindle。重新起一个。
@@ -251,10 +292,12 @@ watchdog() {
         # Wi-Fi 省电（network.sh）、新装 / 更新的应用排队预编译（compile.sh）、电量记录（energy.sh）
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ]; then
             type wifi_ps_tick >/dev/null 2>&1 && wifi_ps_tick
+            type net_watch_tick >/dev/null 2>&1 && net_watch_tick    # Kindle 的网络变了 / 定时：从 Android 里查一次网络（network.sh）
             [ -f $W/booted ] && type bgnice_tick >/dev/null 2>&1 && bgnice_tick     # 后台应用降优先级（bgnice.sh）
             [ -f $W/booted ] && type compile_watch >/dev/null 2>&1 && compile_watch
         fi
         type bat_log >/dev/null 2>&1 && bat_log
+        if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then BAT_POKE_T=0; else bat_poke_tick; fi
         # 系统盘快满了就自动扩（storage.sh）。冻结时不做。
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { type st_auto_tick >/dev/null 2>&1 && st_auto_tick; }
         if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done ) & fi

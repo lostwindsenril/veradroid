@@ -92,9 +92,10 @@ grep 'fullupdate)' -A3 $C | grep -q 'max-time' || fail "cmd.sh fullupdate downlo
 # ---- VeraHome：点了更新有进度对话框，失败回到桌面时说原因 ----
 J=android/packages/VeraHome/src/com/veradroid/home/SysUpdate.java
 # combined tree: VeraHome is the new-model one (the legacy line's VeraHome is checked on its own branch); check once it has the dialog
-if grep -q 'static void progress(Activity a, String latest)' $J; then
+if grep -Eq 'static void progress\((final )?Activity a, String latest\)' $J; then
     grep -q 'new TaskCards.Update(a, false)' $J || fail "progress dialog without the update card"
-    grep -q 'maybeShowFailure(a)' $J || fail "failure is not shown on the home screen"
+    # the new-model VeraHome (1.05) reports a failed update in the merged update card instead of maybeShowFailure
+    grep -q 'maybeShowFailure' $J || grep -q 'TaskCards.Update' android/packages/VeraHome/src/com/veradroid/home/BlocksSettings.java || fail "failure is not shown on the home screen"
 else
     echo "  note: new-model VeraHome has no in-app update progress dialog yet - VeraHome part skipped"
 fi

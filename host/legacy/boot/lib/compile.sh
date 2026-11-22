@@ -82,11 +82,31 @@ compile_done_filter() {
     [ -n "$1" ] && [ "$1" = "$(compile_mode)" ] && return 0
     return 1
 }
+# 512 MB 机型上的大应用（dex >= COMPILE_BIG_DEX_MB，默认 120 MB）只编 verify-at-runtime（port of 70b67b0c，新机型 1.05）。
+# 老机型全是 512 MB。PW5 5.16.2 模拟器（485 MB）番茄 7.4.5（243 MB dex）：interpret-only 时 dex2oat 占到 455 MB、交换区用完、
+# 600 s 编不完，结果一个 odex 也没有，打开它整机换页卡死；verify-at-runtime 74 s、峰值 256 MB、交换区几乎不动，
+# 之后 dex 从 odex 里映射（文件页，可以随时丢掉再读回）。代价：类的校验挪到运行时。COMPILE_BIG_LOW=off 恢复以前的做法。
+compile_dex_mb() { # pkg -> MB（读不出来返回 1）；按安装目录 + base.apk 时间缓存在 $W
+    cdm_d=$(app_dir "$1") || return 1
+    cdm_a=$SYS/data/app/$cdm_d/base.apk
+    cdm_k="$cdm_d $(stat -c %Y "$cdm_a" 2>/dev/null)"; cdm_c=$W/compile.dexmb.$1
+    if [ -f "$cdm_c" ] && [ "$(head -n 1 "$cdm_c")" = "$cdm_k" ]; then sed -n 2p "$cdm_c"; return 0; fi
+    command -v unzip >/dev/null 2>&1 || return 1
+    cdm_m=$(unzip -l "$cdm_a" 2>/dev/null | awk '$4 ~ /^classes[0-9]*\.dex$/ { s += $1 } END { print int(s / 1048576) }')
+    case "$cdm_m" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n%s\n' "$cdm_k" "$cdm_m" > "$cdm_c" 2>/dev/null
+    echo "$cdm_m"
+}
+compile_big() { cb_m=$(compile_dex_mb "$1") && [ "$cb_m" -ge ${COMPILE_BIG_DEX_MB:-120} ]; }
+compile_low_big() { [ "${COMPILE_BIG_LOW:-on}" != off ] && lowmem_ram && compile_big "$1"; }
+compile_pkg_mode() { if compile_low_big "$1"; then echo verify-at-runtime; else echo "$2"; fi; }   # pkg mode
 # 这个包要不要编（$2=force 时只要装着就编）
 compile_needed() { # pkg [force]
     app_dir "$1" >/dev/null || return 1
     [ "$2" = force ] && return 0
     compile_done_filter "$(odex_filter "$1")" && return 1
+    # 512 MB 的大应用：有 odex（安装时的 verify-at-runtime / 以前的 interpret-only）就算编好，不再为 speed 占几百 MB
+    compile_low_big "$1" && [ -n "$(odex_filter "$1")" ] && return 1
     # 同一个安装失败过两次就不再自动试（命令 compile <包> 仍然会强制编）
     nf=$(grep -c "^$1 $(app_dir "$1") fail" $CLOG 2>/dev/null); [ "${nf:-0}" -ge 2 ] && return 1
     grep -q "^$1 $(app_dir "$1") capped" $CLOG 2>/dev/null && return 1
@@ -142,9 +162,10 @@ compile_fix_invalid() {
         for p in $(compile_invalid_pkgs); do
             compile_held && break
             [ -f $W/frozen ] || [ -f $W/saver_frozen ] && break
-            compile_pm_start "$p" $W/compile.inv.out -m interpret-only -f "$p"
+            ci_f=interpret-only; compile_low_big "$p" && ci_f=verify-at-runtime
+            compile_pm_start "$p" $W/compile.inv.out -m $ci_f -f "$p"
             compile_babysit $cp_ "$p"; compile_pm_wait
-            t "compile: $p had no usable odex, interpret-only -> $(odex_filter "$p") ($(tr '\n' ' ' < $W/compile.inv.out | cut -c1-60))"
+            t "compile: $p had no usable odex, $ci_f -> $(odex_filter "$p") ($(tr '\n' ' ' < $W/compile.inv.out | cut -c1-60))"
         done
     ) </dev/null >>$LOG 2>&1 &
 }
@@ -305,7 +326,9 @@ compile_nocode() { # pkg
 compile_app_uid() { awk -v p="$1" '$1 == p { print $2; exit }' $SYS/data/system/packages.list 2>/dev/null; }
 compile_app_running() { # pkg
     car_u=$(compile_app_uid "$1"); [ -n "$car_u" ] || return 1
-    awk -v u="$car_u" '/^Uid:/ { if ($2 == u) { f = 1; exit } } END { exit !f }' /proc/[0-9]*/status 2>/dev/null
+    # 经 cat 读：busybox awk 打不开一个文件（进程在 glob 展开后、awk 读到它之前退出了）就整个退出、END 不跑，
+    # 排在后面的应用进程根本没被看到 → 误判“没在跑”，编译开了又被停，一分钟一次反复（PW5 用户诊断 2026-11-21）。cat 跳过读不到的接着读。
+    cat /proc/[0-9]*/status 2>/dev/null | awk -v u="$car_u" '/^Uid:/ { if ($2 == u) { f = 1; exit } } END { exit !f }'
 }
 # 队列里只剩在跑的应用（不在前台）：用户空闲、等了 COMPILE_RUNNING_WAIT_S（默认 600）秒以后，请 Android 结束它可以安全结束的
 # 进程（am kill：只杀后台 / 缓存进程，不碰前台和正在被用的服务），每个包 10 分钟最多一次。结束不了就继续等，不强编。
@@ -521,6 +544,7 @@ compile_dex2oat_for() { # pkg：有给它编译的 dex2oat / patchoat 在跑
 compile_light() { # pkg [timeout]
     rf=interpret-only
     [ "$2" = timeout ] && [ -s "$SYS/data/misc/profiles/cur/0/$1/primary.prof" ] && rf=speed-profile
+    compile_low_big "$1" && rf=verify-at-runtime      # 512 MB 的大应用：只补 verify-at-runtime（见 compile_low_big）
     compile_pm_start "$1" $W/compile.light.out -m $rf -f "$1"
     compile_babysit $cp_ "$1"; compile_pm_wait
 }
@@ -716,7 +740,7 @@ compile_worker() {
         compile_user_active || rm -f $W/compile.needidle
         idx=$((idx + 1)); echo $idx > $W/compile.index
         compile_status state=running "pkg=$pkg" "index=$idx" "total=$tot" "last=$last"
-        compile_one "$pkg" "$mode"
+        compile_one "$pkg" "$(compile_pkg_mode "$pkg" "$mode")"
     done
     [ -n "$gaveup" ] && return 0
     compile_status state=idle "last=$(cat $W/compile.last 2>/dev/null)" "done=$idx"

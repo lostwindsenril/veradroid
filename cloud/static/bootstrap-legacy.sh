@@ -407,6 +407,100 @@ space_check_before_download() { # size_bytes
     fi
 }
 
+# BEGIN vd_sys_room_early
+# 镜像机型（LOOP=1：系统盘是 /mnt/base-us 上的一个 ext4 镜像）的系统盘空间，在下载之前就查（和后面“空间预检”同一个算法）。
+# 以前只在下载 + 备份之后才查：用户诊断（KT6）1.07 -> 1.10 下了 101 MB（20 分钟）、备份 248 MB（5 分钟）以后才报
+# “空间不够：需要约 600 MB，只有 575 MB”（代码 21），退回 Kindle，用户看到的就是“点了更新一直没反应”。
+# 现在：不够就先在线扩大镜像（和 storage.sh 的自动扩容一样：ext4、一个 loop、resize2fs、losetup -c；中断了有
+# veradroid/state/resize.state，下次挂载时 st_recover 收尾），扩不了才停下，什么都还没下载、没备份。
+vd_sys_room_need() { # 和下面空间预检（LOOP=1）一样的估算（MB）
+    vr_gz=${PARTS_ROOTFS_GZ:-}; [ -n "$PARTS" ] || vr_gz=$(( ${size:-150000000} / 2 ))
+    # 老机型的预检：loop 镜像按 2.5 倍 + 128 MB（旧 rootfs 先删），VD_IMGMB 测试按 2 倍 + 30 MB；这里只在 LOOP=1 时用
+    case "${VD_IMGMB:-}" in ''|*[!0-9]*) echo $(( ${vr_gz:-150000000} / 1048576 * 5 / 2 + 128 )) ;; *) echo $(( ${vr_gz:-150000000} * 2 / 1048576 + 30 )) ;; esac
+}
+# 旧镜像本身占多少 MB（装新的时会删掉，算作可用）。Android 在跑时 rootfs 下面挂着 proc、sys、data（同一个系统盘）、
+# storage（又绑回 data/media，里面还绑着 Kindle 的 documents）：直接 du 会把用户数据和书都算成“删掉旧镜像能腾出来的”，
+# 还要走一遍 /proc（模拟器 KT6 5.17.1 chroot 模式：两分钟没走完）。非递归地再绑一次，只看镜像自己的文件。
+vd_rootfs_mb() {
+    [ -d "$SYS/rootfs" ] || { echo 0; return 0; }
+    vm_d=/dev/shm/vd-rootfs-du.$$
+    if mkdir -p "$vm_d" 2>/dev/null && mount --bind "$SYS/rootfs" "$vm_d" 2>/dev/null; then
+        du -sxm "$vm_d" 2>/dev/null | awk '{print $1}'
+        umount "$vm_d" 2>/dev/null || umount -l "$vm_d" 2>/dev/null
+    else
+        du -sxm "$SYS/rootfs" 2>/dev/null | awk '{print $1}'
+    fi
+    rmdir "$vm_d" 2>/dev/null
+    return 0
+}
+vd_sys_room_free() {
+    vr_f=$(df -m "$SYS" 2>/dev/null | awk 'NR==2{print $4}')
+    vr_o=$(vd_rootfs_mb)
+    echo $(( ${vr_f:-0} + ${vr_o:-0} ))
+}
+vd_sys_grow_online() { # 目标 MB；0 = 文件系统已经扩到目标
+    vg_l=$(img_loops); [ "$(echo "$vg_l" | grep -c .)" = 1 ] || return 1
+    [ "$(awk -v m="$SYS" '$2 == m { print $3 }' /proc/mounts | tail -1)" = ext4 ] || return 1
+    vg_r=$(command -v resize2fs 2>/dev/null) || { [ -x "$VD/bin/resize2fs" ] && vg_r=$VD/bin/resize2fs; } || return 1
+    losetup --help 2>&1 | grep -q -e '-c' || return 1
+    vg_dev=/dev/$vg_l; [ -b "$vg_dev" ] || vg_dev=/dev/loop/${vg_l#loop}
+    vg_from=$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')
+    [ -n "$vg_from" ] && [ "$1" -gt "$vg_from" ] || return 1
+    vg_st=/mnt/base-us/veradroid/state/resize.state
+    [ -e "$vg_st" ] && return 1                      # 别的调整没做完：不插手
+    # 和 storage.sh 同一把锁（看门狗的自动扩容 / 设置里的调整正在做就不插手）
+    vg_lk=$W/resize.lock; mkdir -p "$W" 2>/dev/null
+    if ! mkdir "$vg_lk" 2>/dev/null; then
+        vg_o=$(cat "$vg_lk/pid" 2>/dev/null); [ -n "$vg_o" ] && kill -0 "$vg_o" 2>/dev/null && return 1
+    fi
+    echo $$ > "$vg_lk/pid"
+    vd_sys_grow_locked "$1" "$vg_r" "$vg_dev" "$vg_from" "$vg_st"; vg_rc=$?
+    rm -f "$vg_lk/pid"; rmdir "$vg_lk" 2>/dev/null
+    return $vg_rc
+}
+vd_sys_grow_locked() { # to resize2fs dev from statefile
+    vg_r=$2; vg_dev=$3; vg_from=$4; vg_st=$5
+    mkdir -p /mnt/base-us/veradroid/state 2>/dev/null
+    printf 'op=grow\nfrom=%s\nto=%s\nphase=extend\n' "$vg_from" "$1" > "$vg_st" && sync
+    truncate -s "${1}M" "$SYSTEM_IMG" 2>/dev/null
+    vg_cur=$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')
+    # FAT 不支持稀疏加长时 truncate 会失败：和 storage.sh 的 st_extend 一样补零
+    [ "$vg_cur" != "$1" ] && [ -n "$vg_cur" ] && [ "$1" -gt "$vg_cur" ] && dd if=/dev/zero of="$SYSTEM_IMG" bs=1M seek="$vg_cur" count=$(($1 - vg_cur)) conv=notrunc 2>/dev/null
+    if [ "$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')" != "$1" ]; then
+        truncate -s "${vg_from}M" "$SYSTEM_IMG" 2>/dev/null; rm -f "$vg_st"; return 1   # 文件系统还没动，截回去
+    fi
+    sync; printf 'op=grow\nfrom=%s\nto=%s\nphase=resize\n' "$vg_from" "$1" > "$vg_st"
+    if losetup -c "$vg_dev" 2>/dev/null && "$vg_r" "$vg_dev" >> /mnt/base-us/veradroid/logs/install-detail.log 2>&1; then
+        sync; rm -f "$vg_st"; return 0
+    fi
+    return 1    # 文件加长了、文件系统没扩：标记留着，下次挂载时 st_recover 补上（没有坏处）
+}
+vd_sys_room_early() {
+    [ "$LOOP" = 1 ] && [ -f "$SYSTEM_IMG" ] && grep -q " $SYS " /proc/mounts || return 0
+    vr_need=$(vd_sys_room_need); vr_free=$(vd_sys_room_free)
+    vlog "space (early): system disk need ${vr_need}M free ${vr_free}M"
+    [ "$vr_free" -lt "$vr_need" ] || return 0
+    # 扩多少：缺的 + 256 MB 余量，按 64 MB 取整；Kindle 那边要留 256 MB + 下载和备份的地方；FAT 上单个文件最多 4095 MB
+    vr_img=$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')
+    vr_to=$(( (vr_img + vr_need - vr_free + 256 + 63) / 64 * 64 ))
+    vr_k=$(df -m /mnt/base-us 2>/dev/null | awk 'NR==2{print $4}')
+    if [ -n "$PARTS" ]; then vr_dl=${pp_tot:-0}; else vr_dl=${size:-0}; fi
+    vr_dl=$(( vr_dl / 1048576 * 2 + 128 ))
+    vr_why=
+    case "$(stat -f -c %T /mnt/base-us 2>/dev/null)" in vfat|msdos|fat) [ "$vr_to" -le 4095 ] || vr_why="FAT 上系统盘最大 4 GB" ;; esac
+    [ -z "$vr_why" ] && [ $(( vr_to - vr_img + 256 + vr_dl )) -gt "${vr_k:-0}" ] && vr_why="Kindle 剩余空间只有 ${vr_k:-?} MB"
+    grep -q '^STORAGE_AUTO=0' "$SYS/settings.conf" 2>/dev/null && [ -z "$vr_why" ] && vr_why="自动扩容已关闭"
+    if [ -z "$vr_why" ]; then
+        vp_step dl "系统盘空间不够，先扩大到 $vr_to MB" "在线扩大，不用停 Android，几秒钟"
+        if vd_sys_grow_online "$vr_to"; then
+            vlog "space (early): system disk grown online $vr_img -> $vr_to MB, free now $(vd_sys_room_free)M"
+            [ "$(vd_sys_room_free)" -ge "$vr_need" ] && return 0
+        else vr_why="在线扩大没有成功"; vlog "space (early): online grow $vr_img -> $vr_to MB failed"; fi
+    fi
+    DIE_CODE=21 die "系统盘空间不够：这次更新需要约 ${vr_need} MB，系统盘里只有 ${vr_free} MB（${vr_why:-扩大后还是不够}）。还没有下载和备份，什么都没改。可以在 设置 → 存储空间 里把系统盘扩大，或删掉不用的应用后再更新"
+}
+# END vd_sys_room_early
+
 restore_missing() { # backup.tgz destdir
     [ -f "$1" ] && [ -d "$2" ] || return 0
     mkdir -p "$TMP" 2>/dev/null || true
@@ -753,8 +847,10 @@ vp_watch() {
 VP_TICK=
 vp_ticker_start() {
     vp_ticker_stop
+    # $$ 在子 shell 里仍是起它的那个脚本的 pid：脚本被硬杀（超时、SSH 断开）时 vp_ticker_stop 跑不到，
+    # 以前这个子 shell 就成了孤儿，每 5 秒 fork 一次直到 Kindle 重启（社区报告：PW4 模拟器一轮回归攒了 24 个）。父进程没了就退
     ( exp=${1:-60}; [ "$exp" -gt 0 ] 2>/dev/null || exp=60
-      while :; do
+      while [ -d /proc/$$ ]; do
           e=$(( $(vp_now) - VP_ST0 )); p=$((e * 100 / exp)); [ $p -gt 95 ] && p=95
           l2=$2; [ -n "${3:-}" ] && [ $e -gt $((exp * 2)) ] && l2=$3
           vp_progress $p "已用 $(vp_mmss $e) · 一般要 $(vp_mmss $exp) 左右" "$l2"
@@ -1163,6 +1259,36 @@ vd_parts_canon() {
            else if (t == "8") print "f", ((($5 " " $6 " " $7 " " $8) in h) ? h[$5 " " $6 " " $7 " " $8] : "?"), $2, $3, $4, p
            else print "x", t, p }' "$PD/hashdb" "$PD/c.links" "$PD/c.stat" | LC_ALL=C sort > "$2"
 }
+# BEGIN vd_parts_under
+# chroot 模式（4.9 内核的 KT6 / PW5 5.17 等，宿主和 Android 同一个挂载命名空间）Android 在跑时，宿主把几个文件直接绑在
+# $SYS/rootfs 上面（dex2oat / cmd 的包装、闹钟修复的 libandroid_servers.so）：上面这一段哈希到的是绑上去的那份，
+# 镜像里的原版“本机没有”，又不在 vol 部件里 -> 每次更新都下整个系统镜像（约 97 MB；用户诊断 KT6 5.17.1：
+# 1.04 -> 1.07、1.07 -> 1.10 都是 image: full，慢网下光这一项 20 分钟）。这里把被盖住的原文件也算上：
+# 非递归地把 $SYS/rootfs 再绑一次（只看得到镜像本身，看不到上面的挂载），读原文件的 sha256。输出 "sha 路径"（路径是
+# 正常的 $SYS/rootfs/...：第二段在 Android 停了、挂载都卸掉以后才从那里拷，那时就是原文件）。
+# 临时目录在 tmpfs 上，只 rmdir 不 rm -rf：万一卸不掉，也不会顺着它删到镜像里。
+vd_parts_under_list() { # $SYS/rootfs 里被挂载盖住的路径（相对 rootfs；data/ 不管；带转义的怪名字跳过）
+    awk -v r="$SYS/rootfs/" 'index($2, r) == 1 && $2 != r "data" && index($2, r "data/") != 1 && index($2, "\\") == 0 { print substr($2, length(r) + 1) }' "${VD_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
+}
+vd_parts_under() {
+    [ -d "$SYS/rootfs" ] || return 0
+    pu_l=$(vd_parts_under_list)
+    [ -n "$pu_l" ] || return 0
+    pu_d=/dev/shm/vd-parts-under.$$; mkdir -p "$pu_d" 2>/dev/null || return 0
+    if mount --bind "$SYS/rootfs" "$pu_d" 2>/dev/null; then
+        pu_n=0
+        for pu_p in $pu_l; do
+            [ -f "$pu_d/$pu_p" ] && [ ! -L "$pu_d/$pu_p" ] || continue
+            pu_s=$(sha256sum "$pu_d/$pu_p" 2>/dev/null | cut -c1-64)
+            [ -n "$pu_s" ] && { echo "$pu_s $SYS/rootfs/$pu_p"; pu_n=$((pu_n + 1)); }
+        done
+        umount "$pu_d" 2>/dev/null || umount -l "$pu_d" 2>/dev/null
+        vlog "parts: $pu_n image files hidden under host bind mounts hashed from the image itself"
+    fi
+    rmdir "$pu_d" 2>/dev/null
+    return 0
+}
+# END vd_parts_under
 # ---- 第一段（下载阶段，Android 可能还在跑：只读本机文件）----
 vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没有 rootfs.tar.gz），PARTS_ROOTFS=tree|full
     [ "${VD_PARTS:-1}" != 0 ] || return 1
@@ -1203,6 +1329,7 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
         vd_parts_canon "$pp_d" "$PD/c.out"
         awk -v d="$pp_d" 'FILENAME == ARGV[1] { if ($1 == "f" && $2 != "?") { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]* /, "", p); print $2, d "/" substr(p, 3) }; next }' "$PD/c.out" >> "$PD/src.rootfs"
     done
+    vd_parts_under >> "$PD/src.rootfs"
     vlog "parts: hashed local files in $(( $(vp_now) - pp_t0 ))s ($(wc -l < "$PD/src.host" | tr -d ' ') program files, $(wc -l < "$PD/src.rootfs" | tr -d ' ') image files)"
     # 程序目录：每个部件，所有文件本机都有 -> 从本机拷；否则下载
     pp_need=$(awk 'FILENAME == ARGV[1] { h[$1] = 1; next } $1 == "file" && !($2 in h) { n[$4] = 1 } END { for (p in n) print p }' "$PD/src.host" "$I" | LC_ALL=C sort | tr '\n' ' ')
@@ -1256,6 +1383,8 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
                 set -- $pp_vol; echo "$3 $1 $2 系统文件" >> "$PD/dl.list"; pp_rl="$pp_rl $3"; PARTS_ROOTFS_GZ=$((PARTS_ROOTFS_GZ + $4))
             fi ;;
     esac
+    # 系统盘（镜像机型）够不够装：在下载任何部件之前查，不够先在线扩大，扩不了就停在这里（vd_sys_room_early）
+    PARTS=1; vd_sys_room_early; PARTS=
     pp_cnt=$(wc -l < "$PD/dl.list" | tr -d ' '); pp_n=0
     while read -r f s z l; do
         pp_n=$((pp_n + 1))
@@ -2130,6 +2259,7 @@ else
         show "增量更新：只下载了 $(vp_mb "$PARTS_DL") MB（整包 $(vp_mb "${size:-0}") MB）"
     else
         space_check_before_download "${size:-0}"
+        vd_sys_room_early
         show "正在下载 VeraDroid $ver（约 $(( ${size:-136314880} / 1048576 )) MB）…"
         progress_line 0 "下载中"
         # 分段并行 + 镜像（vd_fetch，直链优先）；断了从各段的断点重试，连续 8 次没进展才放弃
@@ -2347,7 +2477,7 @@ need_mb=$(( ${rootfs_gz:-150000000} * 3 / 1048576 + 200 ))
 # VD_IMGMB（小存储测试）：系统是预编译好的（odex / boot.oat 都在镜像里），解开后约是压缩包的 2 倍，余量只留 30 MB
 case "${VD_IMGMB:-}" in ''|*[!0-9]*) ;; *) need_mb=$(( ${rootfs_gz:-150000000} * 2 / 1048576 + 30 )) ;; esac
 if [ "$LOOP" = 1 ]; then free_mb=$(df -m "$SYS" | awk 'NR==2{print $4}')
-    old_mb=$(du -sm "$SYS/rootfs" 2>/dev/null | awk '{print $1}'); free_mb=$(( free_mb + ${old_mb:-0} ))
+    old_mb=$(vd_rootfs_mb); free_mb=$(( free_mb + ${old_mb:-0} ))
 else free_mb=$(df -m /mnt/base-us | awk 'NR==2{print $4}'); fi
 vlog "space: need ${need_mb}M free ${free_mb}M (loop=$LOOP)"
 [ "${free_mb:-0}" -ge "$need_mb" ] || die "空间不够：安装需要约 ${need_mb} MB，现在只有 ${free_mb} MB。什么都没有删除"

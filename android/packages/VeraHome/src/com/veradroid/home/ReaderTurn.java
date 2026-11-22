@@ -40,4 +40,16 @@ final class ReaderTurn {
     static boolean chapterHasMore(String s, int end) {
         return skipBreaks(s, Math.max(0, end)) < s.length();
     }
+
+    /** 显示桥 SWIPE 的方向（0 下 1 上 2 左 3 右），-1 = 不动画。mode：0 关、1 跟随（下一页往左、上一页往右）、2 左、3 右、4 上、5 下。 */
+    static int slideDir(int mode, boolean noSwipe, int dir) {
+        if (mode <= 0 || mode > 5 || noSwipe) return -1;
+        switch (mode) {
+        case 2: return 2;
+        case 3: return 3;
+        case 4: return 1;
+        case 5: return 0;
+        default: return dir < 0 ? 3 : 2;
+        }
+    }
 }

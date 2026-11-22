@@ -1,0 +1,67 @@
+#!/bin/sh
+# legacy 0.8.15 copy of the new-model test (all legacy models run in chroot / hostnet mode).
+# Network after standby / Wi-Fi changes (fix/1105-net-resume, field reports 2026-11-21: KT6 "network gone after a night in
+# standby, pages load forever until I exit and re-enter", KT5 "network drops while reading").
+# Root causes reproduced on the pw5-516211 emulator (chroot / hostnet mode):
+#  1. netd: modifyIpRule is a no-op in hostnet mode, so clearTetheringRules' `while (ret == 0)` loop never ends: the first time
+#     wlan0 goes away netd spins at 100 % with its big lock held, every later command times out, Android never gets a network back.
+#  2. chroot mode never put Android into the freezer group: "android frozen" froze an empty group, Android kept running.
+# Checks: the netd patch is in small-patches.py and the fixed binaries are shipped; the host installs them; the freezer fix;
+# the net check hooks (resume, thaw, watchdog) exist; and the shell helpers behave (slirp DNS rewritten in place, chroot
+# network check waits for the tracked interface, first watchdog round only records, fixed netd copied only when different).
+cd "$(dirname "$0")/.." || exit 2
+fail() { echo "FAIL: $*"; exit 1; }
+T=$(mktemp -d) || exit 2
+trap 'rm -rf "$T"' EXIT
+grep -q 'int clearTetheringRules(const char\* inputInterface) {\\n    if (vdHostNet()) return 0;' android/small-patches.py || fail "netd clearTetheringRules patch missing in small-patches.py"
+for h in legacy; do
+    b=host/$h/boot
+    [ ! -d host/$h/bin ] || [ -s host/$h/bin/netd-hostnet ] || fail "$h: bin/netd-hostnet missing"
+    for f in $b/lib/network.sh $b/lib/sleep.sh $b/lib/watchdog.sh $b/lib/container.sh $b/stop.sh $b/veradroid.sh; do sh -n $f || fail "syntax $f"; done
+    grep -q '^netd_hostnet_fix   #' $b/veradroid.sh || fail "$h: veradroid.sh does not install the fixed netd"
+    grep -q 'net_heal_kick thaw' $b/veradroid.sh || fail "$h: no net check after thaw"
+    grep -q 'net_heal_kick resume' $b/lib/sleep.sh || fail "$h: no net check after the screensaver"
+    grep -q 'net_watch_tick' $b/lib/watchdog.sh || fail "$h: watchdog does not watch the network"
+    grep -q 'rm -f \$W/netheal.pid \$W/net.sig \$W/net.last' $b/stop.sh || fail "$h: stop.sh leaves net check files (stop --stale fast path would never be clean)"
+    awk '/if hostns; then/ { h = 1 } h && /freezer_enter/ { e = 1 } h && /--in-chroot/ { print (e ? "ok" : "late"); exit }' $b/lib/container.sh | grep -qx ok \
+        || fail "$h: chroot container is started outside the freezer group"
+done
+
+# ---- functional: network.sh helpers with a scratch $W ----
+W=$T/w; X=$W/kfb; mkdir -p $X; LOG=$T/log; : > $LOG; NET_UPTIME=$T/uptime; echo "5000.00 1" > $NET_UPTIME
+t() { echo "$*" >> $LOG; }
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+VD=$T/vd; R=$T/r; mkdir -p $VD/bin $R/system/bin
+. host/legacy/boot/lib/network.sh
+# slirp upstream DNS: rewritten in place (bind mount keeps the inode), only when it changed
+ANDROID_DNS="223.5.5.5"
+printf 'nameserver 223.5.5.5\nnameserver 10.0.0.1\n' > $W/resolv.conf
+ino0=$(ls -i $W/resolv.conf | awk '{print $1}')
+mkdir -p $T/etc; printf 'nameserver 10.9.9.9\n' > $T/etc/resolv.conf
+readlink() { [ "$2" = /etc/resolv.conf ] && { echo $T/etc/resolv.conf; return 0; }; command readlink "$@"; }
+net_slirp_dns
+[ "$(ls -i $W/resolv.conf | awk '{print $1}')" = "$ino0" ] || fail "slirp resolv.conf replaced by a new file (slirp keeps the old inode)"
+grep -q '^nameserver 10.9.9.9$' $W/resolv.conf || fail "slirp resolv.conf not updated with the Kindle DNS"
+head -1 $W/resolv.conf | grep -q '223.5.5.5' || fail "ANDROID_DNS no longer first"
+# chroot: network check waits while the default route is on another interface than the one Android tracks
+echo chroot > $W/mode; printf 'iface=wlan0\n' > $X/hostnet
+net_sig() { echo "usb0 6 10.0.15.244/24 10.0.15.201 10.0.15.3,"; }
+ip() { echo "    inet 10.0.15.244/24 scope global"; }
+net_host_up && fail "chroot: kindle counted as online through usb0 while android tracks wlan0"
+net_sig() { echo "wlan0 9 10.0.2.15/24 10.0.2.2 10.0.2.3,"; }
+net_host_up || fail "chroot: kindle on wlan0 not counted as online"
+# watchdog: first round only records; a change starts one check; no check while frozen work is pending
+touch $W/booted; kicks=$T/kicks; : > $kicks
+net_heal_kick() { echo "$1" >> $kicks; }
+net_watch_tick; [ -s $kicks ] && fail "first watchdog round started a network check"
+net_sig() { echo "wlan0 10 10.0.2.15/24 10.0.2.2 10.0.2.3,"; }   # wlan0 recreated (new ifindex)
+net_watch_tick; grep -qx change $kicks || fail "wlan0 recreated but no check"
+: > $kicks; net_watch_tick; [ -s $kicks ] && fail "unchanged network checked again right away"
+echo saver > $W/sleep.cur; echo "0 ok" > $W/net.last; net_watch_tick; [ -s $kicks ] && fail "periodic check during the screensaver"
+rm -f $W/sleep.cur; net_watch_tick; grep -qx periodic $kicks || fail "no periodic check while in use"
+# fixed netd: copied when different, left alone when the same
+hostns() { return 0; }
+echo new > $VD/bin/netd-hostnet; echo old > $R/system/bin/netd
+netd_hostnet_fix; cmp -s $VD/bin/netd-hostnet $R/system/bin/netd || fail "fixed netd not installed"
+: > $LOG; netd_hostnet_fix; [ -s $LOG ] && fail "netd replaced again although it was already the fixed one"
+echo "PASS net-resume"

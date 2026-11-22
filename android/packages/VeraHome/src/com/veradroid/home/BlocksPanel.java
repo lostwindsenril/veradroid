@@ -498,6 +498,8 @@ final class BlocksPanel {
         HostLink.cmd("status");   // 只请宿主把状态文件写新，不改设置
         handler.removeCallbacks(recheck);
         handler.postDelayed(recheck, 700);
+        // 宿主写状态文件要读十来个 lipc 属性，慢的机器上（KT6 模拟器）超过 700 ms：再看一次，不然亮度条要到下次打开才出来
+        handler.postDelayed(recheck, 2500);
     }
 
     private final Runnable recheck = new Runnable() { @Override public void run() { if (showing) readStatus(); } };

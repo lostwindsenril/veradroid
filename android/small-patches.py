@@ -106,6 +106,13 @@ PATCHES = [
     ("system/netd/server/RouteController.cpp",
      "                                     const char* destination, const char* nexthop) {\n    // At least the destination must be non-null.",
      "                                     const char* destination, const char* nexthop) {\n    if (vdHostNet()) return 0;  // VeraDroid: leave the Kindle's routing alone\n    // At least the destination must be non-null."),
+    # hostnet：上面把 modifyIpRule 改成了“什么都不做、返回 0”，可 clearTetheringRules 是 while (ret == 0) 一直删到 ENOENT 为止——
+    # 永远等不到，死循环，而且拿着 netd 的全局锁。Kindle 的 wlan0 一断（关 Wi-Fi、休眠时驱动卸载、换网络），ConnectivityService
+    # 让 netd 把它移出网络（network interface remove），netd 就卡死在这里、占满一个核：之后所有 netd 命令超时，网络注册不回来，
+    # DNS 也不通，只有重启 Android 才好（用户：“休眠后网络没了，退出重进才好”、“读着读着断网”；pw5-516211 模拟器复现）。
+    ("system/netd/server/RouteController.cpp",
+     "WARN_UNUSED_RESULT int clearTetheringRules(const char* inputInterface) {\n    int ret = 0;\n",
+     "WARN_UNUSED_RESULT int clearTetheringRules(const char* inputInterface) {\n    if (vdHostNet()) return 0;  // VeraDroid vdhostnet-v2: modifyIpRule is a no-op here, the loop below would never end\n    int ret = 0;\n"),
     ("system/netd/server/RouteController.cpp",
      "#include \"Fwmark.h\"\n",
      "#include \"Fwmark.h\"\n#include \"NetdConstants.h\"\n"),

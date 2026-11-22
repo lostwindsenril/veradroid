@@ -27,6 +27,16 @@ import java.util.List;
 public class AppDisplayActivity extends Activity {
     static final String KNOBS = HostLink.KFB + "appknobs";
     static final String KEEP_KEY = "KEEPALIVE";
+    /** 只对某些应用的选项（宿主的后台瘦身 appslim.sh 等）：一行 "<包名> KEY|标题|标签=值,…"。 */
+    static final String KNOBS_PKG = HostLink.KFB + "appknobs.pkg";
+
+    /** appknobs.pkg 里属于这个包的选项行（去掉包名）。 */
+    static List<String> pkgLines(List<String> lines, String pkg) {
+        List<String> out = new ArrayList<String>();
+        if (pkg == null || pkg.length() == 0) return out;
+        for (String l : lines) if (l != null && l.startsWith(pkg + " ")) out.add(l.substring(pkg.length() + 1));
+        return out;
+    }
 
     /** 一个选项：labels[0] / values[0] 是“跟随”（值 null = 这个键不写）。 */
     static final class Knob {
@@ -155,7 +165,9 @@ public class AppDisplayActivity extends Activity {
         // 老机型（legacy）的显示桥没有快速滑动 / 图片灰度：宿主发布的设置里没有这两个键就不显示
         hasScroll = HostLink.kv(HostLink.KFB + "settings").containsKey("KFB_SCROLLDU");
         if (newHost) table = AppProf.table();
-        knobs = knobs(hasScroll, newHost ? readLines(KNOBS) : null);
+        List<String> hostLines = null;
+        if (newHost) { hostLines = readLines(KNOBS); hostLines.addAll(pkgLines(readLines(KNOBS_PKG), pkg)); }
+        knobs = knobs(hasScroll, hostLines);
         for (Knob k : knobs) if (KEEP_KEY.equals(k.key)) hostKeep = true;
         String src = newHost ? AppProf.lookup(table, pkg)[0] : "";
         TextView hint = Ui.text(this, (newHost

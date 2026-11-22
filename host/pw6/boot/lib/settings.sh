@@ -10,6 +10,7 @@ settings_defaults() {
     BG_STOP_MIN=0          # 后台应用定时停止：BG_STOP_APPS 里的应用离开前台超过这么多分钟就 force-stop，0 = 关
     BG_STOP_APPS=          # 逗号分隔的包名（桌面 / 输入法 / 前台应用永远不停）
     BOOT_BLOCK=1           # 1 = 第三方应用不许开机自启（pm disable 它们的开机广播接收器，闹钟 / 日历 / 待办类除外）；0 = 恢复（memkeep.sh）
+    APP_SLIM=auto          # 应用瘦身（appslim.sh / appslim.conf）：auto = 按每个应用的选择（“应用优化”的“后台瘦身”，跟随 = 清单默认）；0 = 全部恢复原样
     BOOT_ALLOW=            # 允许开机自启的第三方应用（逗号分隔的包名）
     WIFI_IDLE_OFF_MIN=0    # Android 在前台时 Wi-Fi 空闲（收发 < WIFI_IDLE_BPS 字节/秒）超过这么多分钟就关，换应用时再开；0 = 不关
     WIFI_IDLE_BPS=512
@@ -77,6 +78,8 @@ settings_defaults() {
     KFB_ANIM_DIR=2         # 动画方向：0 下 1 上 2 左 3 右（翻下一页通常用左）
     KFB_ANIM_STEPS=12      # 动画步数：越大越慢越细腻（MTK 驱动要求 <= 刷新区域宽/高）
     KFB_ANIM_MIN=45        # 变化面积超过百分之多少才动画（微信读书翻页约 60%，给别的 App 留余量）
+    KFB_SWIPE=1            # 显示：允许墨水屏控制器的硬件滑动（翻页动画、方块桌面换页）。0 = 一律普通刷新。Kindle 2024 / KT6 默认 0：
+                           # 模拟器上滑动大多不结束，屏幕停在旧画面（看起来像死机）。不管设成几，显示桥发现滑动卡住都会自己关掉并整屏刷新一次
     KFB_ROTATE=0           # 屏幕旋转 0 竖 / 90 / 180 倒过来 / 270（度，画面顺时针转；docs/rotation.md）。180 可即时切换，90/270 要重启 Android
     G_TL=none; G_TR=none; G_BL=kindle; G_BR=none   # 四角长按的动作。左下角默认“回到 Kindle”（2026-11-14 起：Android / 应用卡住时总有一个宿主手势能出去，
                            # 手势提示的“没有响应”会说这个）；其余默认不做（握机器时大拇指压在角上 2 秒容易误触发）。只有配了动作的角才吞掉长按（G_CORNERS）
@@ -147,6 +150,8 @@ settings_load() {
     case "$(cat "$SYS/model" 2>/dev/null)" in
         kt5|kt6|pw6|cs) KFB_ANIM_MODE=0 ;;
     esac
+    # Kindle 2024 / KT6（rossini）：硬件滑动关掉（KFB_SWIPE，见 settings_defaults）。用户反馈：切了界面风格再点亮度，面板没了、什么都点不动，只能强制重启
+    [ "$(cat "$SYS/model" 2>/dev/null)" = kt6 ] && KFB_SWIPE=0
     # 512 MB 机型（实际内存 < 700 MB，和 lowmem_ram 一样，不看 LOWMEM 开关）：一页共享缓冲 + RGB565 窗口缓冲默认开（省 ~8 + ~8 MB）。
     # 只是默认值：机型文件和 settings.conf 照样能改（docs/framework-project.md §9.9）。
     if lowmem_ram; then KFB_ONEPAGE=1; KFB_RGB565=1; fi
@@ -198,7 +203,7 @@ epd_send_smooth() { epd_send PACE ${KFB_PACE:-0}; epd_send CLEAN ${KFB_CLEAN:-0}
 
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && printf 'WEBVIEW_ALT_OK=%s\nWEBVIEW_HAVE=%s\nWEBVIEW_LIVE=%s\n' "$(lowmem_ram && echo 0 || echo 1)" "$(type webview_ok >/dev/null 2>&1 && webview_ok && echo 1 || echo 0)" "$(cat $W/webview.mode 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
@@ -212,7 +217,7 @@ settings_apply() {
     sfile=$W/settings.apply.$$.$(cut -d' ' -f1 /proc/uptime | tr -d .)
     mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
     touch $SYS/settings.conf
-    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK WEBVIEW; do
+    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK WEBVIEW; do
         v=$(sed -n "s/^$k=\([0-9A-Za-z._,]*\)\$/\1/p" "$sfile" | tail -1)
         [ -n "$v" ] || continue
         case "$k=$v" in LOWMEM=auto|LOWMEM=on|LOWMEM=off|KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop|GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default|WEBVIEW=stock|WEBVIEW=alt|WEBVIEW=default) ;; LOWMEM=*|KINDLE_UI=*|GESTURE_HINT=*|WEBVIEW=*) continue ;; esac
@@ -248,6 +253,7 @@ settings_apply() {
     # ANIM 必须先于 SET：显示桥收到 SET 会立刻重绘，若 ANIM 在后面，这次重绘仍用旧步数，
     # 下一条 P/D 又可能先碰到旧缓冲，导致“设置里选了 6 步，日志还是 12”。
     epd_send ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN
+    epd_send SWIPEOK ${KFB_SWIPE:-1}
     epd_send SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}
     epd_send HOLD ${KFB_HOLD:-70}
     epd_send_smooth

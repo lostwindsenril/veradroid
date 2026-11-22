@@ -278,7 +278,11 @@ RDME
     # 装完由 compile.sh 在后台低优先级编成 speed（F6）。APP_COMPILE=off 时保持以前的做法：
     # PW6 (957 MB) 安装时直接 speed；512 MB 机型 interpret-only。不在开机时编译（QEMU 上开机期间的 dex2oat 不可靠）。
     mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
-    if [ "${APP_COMPILE:-auto}" != off ]; then
+    # 512 MB（老机型全是）：安装时只做 verify-at-runtime。interpret-only 对大应用要几百 MB（番茄 243 MB dex：dex2oat 455 MB、
+    # 交换区用完、600 s 还没完），装的时候整机卡死；verify-at-runtime 74 s、256 MB。小应用装完照样由 compile.sh 在空闲时编。
+    if [ "${APP_COMPILE:-auto}" != off ] && [ "${mt:-0}" -lt 700000 ] && [ "${COMPILE_BIG_LOW:-on}" != off ]; then
+        adb_sh 'setprop pm.dexopt.install verify-at-runtime; setprop pm.dexopt.bg-dexopt verify-at-runtime' >/dev/null 2>&1
+    elif [ "${APP_COMPILE:-auto}" != off ]; then
         adb_sh 'setprop pm.dexopt.install interpret-only; setprop pm.dexopt.bg-dexopt interpret-only' >/dev/null 2>&1
     elif [ "${mt:-0}" -ge 700000 ]; then
         adb_sh 'setprop pm.dexopt.install speed; setprop pm.dexopt.bg-dexopt speed' >/dev/null 2>&1
@@ -391,7 +395,7 @@ lmk_tune() {
     s=/proc/$P/root/dev/socket/lmkd
     i=0; while [ ! -S "$s" ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
     if [ -S "$s" ]; then
-        "$VD/bin/vdlmk" "$s" 2048:0 3072:100 4096:200 5120:300 6144:900 8192:906 >>$LOG 2>&1 \
+        "$VD/bin/vdlmk" "$s" 2048:0 3072:100 4096:200 8192:300 14336:900 16384:906 >>$LOG 2>&1 \
             && t "lmk: lmkd thresholds set" || t "lmk: vdlmk failed"
     else
         t "lmk: lmkd socket missing, kernel minfree only"

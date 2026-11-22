@@ -27,7 +27,7 @@ for h in pw6 k49 legacy; do
         echo "BACK $(cat $LMK_SYS/minfree) $(cat $LMK_SYS/adj)"
         lmk_kernel_restore                                     # second stop: nothing saved, nothing changes
         echo "AGAIN $(cat $LMK_SYS/minfree) $(ls $W)"')
-    echo "$out" | grep -q '^TUNED 2048,3072,4096,5120,6144,8192 0,100,200,300,900,906$' || fail "$h tune: $out"
+    echo "$out" | grep -q '^TUNED 2048,3072,4096,8192,14336,16384 0,100,200,300,900,906$' || fail "$h tune: $out"
     echo "$out" | grep -q '^BACK 18432,23040,27648,32256,55296,80640 0,1,2,4,9,15$' || fail "$h restore: $out"
     echo "$out" | grep -q '^AGAIN 18432,23040,27648,32256,55296,80640 *$' || fail "$h second restore / state left: $out"
     [ "$(echo "$out" | grep -c 'saved, restored on stop')" = 1 ] || fail "$h: tune should log once, not every watchdog tick"

@@ -13,9 +13,10 @@
 # 命令（cmd.sh）：
 #   fg <pkg>|home              前台变了
 #   appset <pkg>|<spec>        存用户的设置（spec 空 = 删掉这一行，回到内置推荐 / 全局；"-" = 全跟随）；"appset *|" 全部清掉
+# SLIM 不是显示参数：后台瘦身（appslim.sh，停用 / 恢复应用的后台组件），不发给显示桥
 # KEEPALIVE / BGSTOP 不是显示参数：保持后台 / 离开后几分钟自动停止（memkeep.sh 读合并表 $X/appprof），不发给显示桥
 # OEC_* 不是显示桥的参数：系统镜像（feat/fw-oec，ro.vd.oec=1）里每个应用进程自己读 $X/appoec（见下面 appprof_oec_publish）
-APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
+APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
 
 appprof_valid_pkg() { case "$1" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac; [ ${#1} -le 200 ]; }
 
@@ -90,7 +91,7 @@ appprof_fg() {
     appprof_density_fg "$ap_pkg"
     appprof_ack "$ap_pkg"
     ap_spec=; [ "$ap_pkg" = home ] || ap_spec=$(appprof_spec "$ap_pkg")
-    ap_new=$(appprof_lines "$ap_spec" | grep -v '^KEEPALIVE=\|^BGSTOP=\|^OEC_')
+    ap_new=$(appprof_lines "$ap_spec" | grep -v '^KEEPALIVE=\|^BGSTOP=\|^OEC_\|^SLIM=')
     # 用户在全局里明确选了“不全刷”（settings.conf 里 KFB_FLASH=0）：内置推荐不能替他打开按页数全刷（0.96 用户反馈“更新后会黑屏全刷”）。
     # 用户自己给这个应用存的设置（u / ub）照旧生效。
     if [ -n "$ap_new" ] && grep -qx 'KFB_FLASH=0' "$SYS/settings.conf" 2>/dev/null && [ "$(appprof_src "$ap_pkg")" = b ]; then
@@ -139,6 +140,9 @@ appprof_send() {
     else printf '%s\n' "$ap_msg" > $X/epd.fifo; fi
 }
 
+# 合并表里这个包的 SLIM=（后台瘦身的选择；没有 = 空）
+appprof_slimval() { awk -v p="$1" '$1 == p { print $3 }' $X/appprof 2>/dev/null | tr ';' '\n' | grep '^SLIM='; }
+
 appprof_set() {
     ap_p=${1%%|*}; ap_s=${1#*|}; [ "$ap_s" = "$1" ] && ap_s=
     touch $SYS/settings.apps
@@ -154,7 +158,14 @@ appprof_set() {
     fi
     mv -f $SYS/settings.apps.tmp $SYS/settings.apps
     ap_dpi0=$(appprof_oec_dpi "$ap_p")
+    ap_slim0=; [ "$ap_p" != '*' ] && ap_slim0=$(appprof_slimval "$ap_p")
     appprof_publish
+    # 后台瘦身的选择变了（appslim.sh）：后台按新的选择停用 / 恢复这个应用的组件（"*" = 全部清掉：清单里的应用都按默认再做一遍）
+    if type appslim_apply >/dev/null 2>&1; then
+        if [ "$ap_p" = '*' ]; then ( appslim_all appset ) &
+        elif [ "$ap_slim0" != "$(appprof_slimval "$ap_p")" ]; then ( appslim_apply "$ap_p" appset ) &
+        fi
+    fi
     # 应用进程只在启动时取密度：这个应用的密度变了，停掉它（下次打开按新的密度；设置页是桌面的，应用这时不在前台）
     if [ "$ap_p" != '*' ] && appprof_oec && [ "$ap_dpi0" != "$(appprof_oec_dpi "$ap_p")" ] && type adb_sh >/dev/null 2>&1; then
         adb_sh "am force-stop $ap_p" >/dev/null 2>&1; t "app density changed: $ap_p stopped"

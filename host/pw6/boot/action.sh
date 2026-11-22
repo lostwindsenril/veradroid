@@ -50,6 +50,19 @@ watch_ctl() {   # watch_ctl <ctl 里的文件名>
     [ "${GESTURE_HINT:-all}" = off ] && return 0
     ( sleep 2; [ -e $X/ctl/$1 ] && { echo "[$(date +%T)] no response: $1" >> $AL; badge 3000 "$POS" stuck "NO RESPONSE|没有响应|$(escape_text)"; } ) </dev/null >/dev/null 2>&1 &
 }
+# 回到 Kindle 必须总能做到。命令监听一次只做一条：Android 换页卡死时它可能还卡在上一条命令里，exit 排在后面一直轮不到
+# （2026-11-21 用户：番茄卡住后“回到 Kindle”没反应，只能强制重启；同一天 PW5 512 MB 的诊断里番茄编译把交换区占满）。
+# 发出去 8 秒内没被接走（do_exit 一开始就写 $W/exit.ack）、Android 还开着又没冻结：自己起一个进程直接做（veradroid.sh --exit），
+# 不经过命令监听。两边都做到了也没关系：do_exit 有锁，后到的那个什么都不做。
+exit_send() {
+    rm -f $W/exit.ack
+    send exit
+    ( i=0
+      while [ $i -lt 16 ]; do usleep 500000; [ -e $W/exit.ack ] || [ -f $W/frozen ] && exit 0; i=$((i + 1)); done
+      kill -0 "$(cat $W/pid 2>/dev/null)" 2>/dev/null || exit 0
+      echo "[$(date +%T)] exit not taken by the command listener in 8 s: veradroid.sh --exit" >> $AL
+      cd / && exec setsid sh $VD/boot/veradroid.sh --exit ) </dev/null >/dev/null 2>&1 &
+}
 # 动作名 -> 做什么
 run_action() {
     case "$1" in
@@ -62,7 +75,7 @@ run_action() {
             # 直到重启 VeraDroid（用户诊断-20261120：开机时下划了一次，之后一整天应用里拉不出面板）。
             # 临时文件名以点开头：HostService 只认 act.*，不会把临时文件当手势吃掉；带 $$：连着两次手势不抢同一个临时文件
             : > $X/ctl/.act.$1.$$ && mv -f $X/ctl/.act.$1.$$ $X/ctl/act.$1; watch_ctl act.$1 ;;
-        kindle|return) hint kindle "KINDLE|回 Kindle"; send exit ;;
+        kindle|return) hint kindle "KINDLE|回 Kindle"; exit_send ;;
         clear|refresh) hint clear "REFRESH|清残影"; [ -p $X/epd.fifo ] && kill -0 "$(cat $W/epd.pid 2>/dev/null)" 2>/dev/null && fifo_put FULL ;;
         invert) hint invert "INVERT|反色"; send invert ;;
         stop) hint power "STOP|关闭 Android"; send stop ;;
@@ -112,6 +125,8 @@ step() {   # $1 = 属性 $2 = + / -  按 2 档调，范围 0..最大
     cur=$(lipc-get-prop $p $1 2>/dev/null); max=$(lipc-get-prop $p flMaxIntensity 2>/dev/null)
     [ -n "$cur" ] && [ -n "$max" ] || return
     [ "$2" = "+" ] && n=$((cur + 2)) || n=$((cur - 2))
+    # 手动调亮度：自动亮度开着时 powerd 会按传感器改回去，先关掉（cmd.sh light_set 同理）
+    [ $1 = flIntensity ] && [ "$(lipc-get-prop $p flAuto 2>/dev/null)" = 1 ] && lipc-set-prop -i $p flAuto 0 2>/dev/null
     [ $n -lt 0 ] && n=0; [ $n -gt $max ] && n=$max
     lipc-set-prop -i $p $1 $n
     [ "$max" -gt 0 ] 2>/dev/null || return 0

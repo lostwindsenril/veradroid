@@ -22,7 +22,7 @@ grep -q '^lowmem_ram() .*-lt 700000' $H/lib/settings.sh || fail "settings.sh: lo
 A=$H/lib/afterboot.sh
 grep -q '^lmk_tune()' $A || fail "afterboot.sh: no lmk_tune"
 grep -q '^    lmk_tune\( \|$\)' $A || fail "afterboot.sh: lmk_tune never called"
-grep -q '2048:0 3072:100 4096:200 5120:300 6144:900 8192:906' $A || fail "lmk thresholds changed"
+grep -q '2048:0 3072:100 4096:200 8192:300 14336:900 16384:906' $A || fail "lmk thresholds changed"
 [ -f tools/src/vdlmk.c ] || fail "tools/src/vdlmk.c missing"
 grep -q 'SOCK_SEQPACKET' tools/src/vdlmk.c || fail "vdlmk must use a SEQPACKET socket (lmkd protocol)"
 grep -q 'LMK_TARGET 0' tools/src/vdlmk.c || fail "vdlmk: wrong command id"

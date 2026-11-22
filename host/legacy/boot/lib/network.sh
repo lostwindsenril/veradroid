@@ -96,7 +96,7 @@ net_start() {
     # chroot 模式（内核没有 net 命名空间）：Android 和 Kindle 共用网络，不起 slirp，改走 hostnet
     if [ "$(cat $W/mode 2>/dev/null)" = chroot ] || hostns; then hostnet_fix_rules; hostnet_write; return 0; fi
     [ -x "$SLIRP" ] || { t "net: $SLIRP missing, no network"; return 0; }
-    rm -f $W/slirp.sock
+    rm -f $W/slirp.sock $W/slirp.log   # 旧日志也删：重启 slirp 时下面的等待会先读到上一个 slirp 的 "sent tapfd"（还没被截断），当成已经起来
     # 演示系统没有 DHCP 客户端，用 --configure 直接配好；真的 Android 自己 DHCP（slirp 发 .15）
     CONF=; [ -f $R/.demo ] && CONF=--configure
     target=$(readlink -f /etc/resolv.conf)
@@ -106,4 +106,134 @@ net_start() {
     echo $! > $W/slirp.pid
     i=0; while [ $i -lt 20 ] && ! grep -q 'sent tapfd' $W/slirp.log 2>/dev/null; do usleep 500000; i=$((i + 1)); done
     t "net: slirp4netns $(grep -q 'sent tapfd' $W/slirp.log && echo up || echo 'NOT up'): $(tail -1 $W/slirp.log)"
+}
+
+# ---- 网络自愈（fix/1105-net-resume，2026-11-21 社区：KT6“待机一夜回来网络没了、一直转圈，退出再进才好”，
+#      KT5“读着读着断网、下一章加载不出来，只能退出”；用户诊断：解冻后几分钟用户自己点了重启 / 退出再进）----
+# 待机（1.03 起 Kindle 真的会休眠）、关 / 开 Wi-Fi、换网络时，Kindle 的 wlan0 会被拆掉重建、DHCP 重新拿地址 / DNS。
+#  - chroot（hostnet，没有 net 命名空间的内核）：根因在 netd（pw5-516211 模拟器复现）：wlan0 一拆，netd 卡死在 clearTetheringRules
+#    的死循环里、占满一个核，之后所有命令超时，Android 的网络再也注册不回来。修法是换上修好的 netd（netd_hostnet_fix），下面的检查兜底。
+#  - 命名空间（slirp4netns）：slirp 自己的 DNS 只读启动时那份 resolv.conf（ANDROID_DNS + 当时的 Kindle DNS）；外面的地址变了以后
+#    还开着的连接全是死的。
+# 做法：解冻 / 屏保醒来 / Kindle 的网络变了（地址、网关、DNS、wlan0 重建）时，等 Kindle 自己连上，再从 Android 里面试一次
+# “解析域名 + 连 80 端口”（Android 自己的解析器和路由，toybox nc）。不通而 Kindle 通：先刷新 slirp 的 DNS 再试，还不通就重启
+# slirp（Android 的 eth0 重建、重新 DHCP，旧连接全部断开重连）；chroot 模式下 netd 卡死就结束它（init 会拉起来）。每一步记日志。
+# 用着的时候（没冻结、没屏保）每 NET_CHECK_S 秒（默认 600，0 = 不查）也查一次；平时看门狗只比较几个 /sys、/proc 里的值，不发包。
+NET_PROBE_HOSTS=${NET_PROBE_HOSTS:-"connect.rom.miui.com www.baidu.com www.qq.com"}
+net_sig() { # Kindle 现在的网络：默认路由的网卡 + 它的 ifindex + IPv4 地址 + 网关 + DNS（变了就要查一次）
+    ns_dev=$(ip route 2>/dev/null | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    ns_gw=$(ip route 2>/dev/null | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }')
+    [ -n "$ns_dev" ] || { echo none; return 0; }
+    echo "$ns_dev $(cat /sys/class/net/$ns_dev/ifindex 2>/dev/null) $(ip -4 addr show dev "$ns_dev" 2>/dev/null | awk '$1 == "inet" { print $2; exit }') $ns_gw $(grep '^nameserver' "$(readlink -f /etc/resolv.conf)" 2>/dev/null | awk '{ printf "%s,", $2 }')"
+}
+net_host_up() { # Kindle 自己有默认路由和地址（不发包）。chroot：还得是 Android 跟踪的那块网卡（Wi-Fi 断着时可能只剩 USB 网络）
+    nh_d=$(net_sig | cut -d' ' -f1); [ "$nh_d" != none ] || return 1
+    if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+        nh_i=$(sed -n 's/^iface=//p' $X/hostnet 2>/dev/null); [ -z "$nh_i" ] || [ "$nh_i" = "$nh_d" ] || return 1
+    fi
+    ip -4 addr show dev "$nh_d" 2>/dev/null | grep -q 'inet '
+}
+net_probe() { # 从 Android 里面：解析 + TCP 连 80。通了返回 0（$NP_OK = 通的那个域名）
+    np_p=$(cat $W/pid 2>/dev/null); [ -n "$np_p" ] && kill -0 "$np_p" 2>/dev/null || return 2
+    for np_h in $NET_PROBE_HOSTS; do
+        if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+            vd_timeout 12 chroot /proc/$np_p/root /system/bin/toybox timeout 9 /system/bin/toybox nc -w 6 "$np_h" 80 </dev/null >/dev/null 2>&1
+        else
+            vd_timeout 12 nsenter -t $np_p -m -u -i -n -p -r -w /system/bin/toybox timeout 9 /system/bin/toybox nc -w 6 "$np_h" 80 </dev/null >/dev/null 2>&1
+        fi && { NP_OK=$np_h; return 0; }
+    done
+    return 1
+}
+net_slirp_dns() { # slirp 的上游 DNS 换成 Kindle 现在的（同一个文件原地改写：bind 挂载认 inode，libslirp 看到修改时间变了就重读）
+    [ -f $W/resolv.conf ] || return 0
+    { for d in $ANDROID_DNS; do echo "nameserver $d"; done
+      grep '^nameserver' "$(readlink -f /etc/resolv.conf)" 2>/dev/null; } > $W/resolv.new
+    cmp -s $W/resolv.new $W/resolv.conf || { cat $W/resolv.new > $W/resolv.conf; t "net: slirp dns now $(awk '{printf "%s ", $2}' $W/resolv.conf)"; }
+    rm -f $W/resolv.new
+}
+net_slirp_restart() {
+    sp=$(cat $W/slirp.pid 2>/dev/null)
+    for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null) $sp; do kill -CONT $p 2>/dev/null; kill $p 2>/dev/null; done
+    i=0; while [ $i -lt 20 ] && [ -n "$(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null)" ]; do usleep 100000; i=$((i + 1)); done
+    net_setup
+    P=$(cat $W/pid 2>/dev/null) net_start
+    # 传书的端口转发在旧的 slirp 里：重新加（cmd.sh 的 fwd 会自己处理“已经开着”）
+    nf_port=$(cut -d: -f1 $W/fwd.ipt 2>/dev/null)
+    [ -f $W/fwd.id ] && [ -n "$nf_port" ] && type fwd_on >/dev/null 2>&1 && { fwd_on "$nf_port"; t "net: transfer port $nf_port forwarded again"; }
+}
+netd_wedged() { # chroot 模式：netd 有线程一直在跑（老 netd 的 clearTetheringRules 死循环）
+    np=$(chroot /proc/$(cat $W/pid)/root /system/bin/toybox pidof netd 2>/dev/null | cut -d' ' -f1)
+    [ -n "$np" ] || np=$(for d in /proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = netd ] && { echo ${d#/proc/}; break; }; done)
+    [ -n "$np" ] || return 1
+    a=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null); sleep 2
+    b=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null)
+    [ $((b - a)) -ge 150 ] 2>/dev/null   # 2 秒里用户态 ≥ 1.5 秒 = 在空转
+}
+# $1 = 为什么查（resume / thaw / change / periodic / manual）。在后台跑；同时只有一个。
+net_heal() {
+    [ -f $W/booted ] || return 0
+    nh_why=$1
+    # 醒来以后 Kindle 要几秒到几十秒才重新连上 Wi-Fi：等它（最多 90 秒）。Kindle 自己没网（Wi-Fi 关着、飞行模式）就不是我们的事
+    i=0; while ! net_host_up && [ $i -lt 45 ]; do sleep 2; i=$((i + 1)); done
+    net_host_up || { t "net check ($nh_why): kindle has no network itself, nothing to do"; return 0; }
+    # chroot：给 Android 的那份（DNS 等）按 Kindle 现在的重写，但只在默认路由还在同一块网卡上时（Wi-Fi 断着、走 USB 网络的那一刻
+    # 写进去的 iface=usb0 会让以太网服务一直等一块它不跟踪的网卡：模拟器实测）
+    if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+        [ "$(net_sig | cut -d' ' -f1)" = "$(sed -n 's/^iface=//p' $X/hostnet 2>/dev/null)" ] && hostnet_write >/dev/null
+    else net_slirp_dns; fi
+    sleep ${NET_SETTLE_S:-3}
+    net_probe && { [ "$nh_why" = periodic ] || t "net check ($nh_why): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) ok" > $W/net.last; return 0; }
+    t "net check ($nh_why): android cannot reach the internet but the kindle is online ($(net_sig)): repairing"
+    if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+        if netd_wedged; then
+            t "net: netd ($np) is spinning (old netd, wlan0 was removed): ending it, init restarts it"
+            kill -9 "$np" 2>/dev/null; sleep 8
+        fi
+    else
+        t "net: restarting slirp4netns (android's eth0 comes back and takes a new lease)"
+        net_slirp_restart; sleep 12
+    fi
+    if net_probe; then t "net: repaired ($nh_why): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) repaired" > $W/net.last; return 0; fi
+    sleep 15
+    if net_probe; then t "net: repaired ($nh_why, slow): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) repaired" > $W/net.last; return 0; fi
+    t "net: still no network in android after repair ($nh_why); kindle: $(net_sig)"
+    echo "$(cut -d. -f1 /proc/uptime) fail" > $W/net.last
+    vd_slog "network: android had no network after $nh_why and the automatic repair did not help (kindle: $(net_sig))"
+    return 1
+}
+net_heal_kick() { # 后台查一次（已经在查就不再起）
+    [ "${NET_CHECK:-1}" = 1 ] || return 0
+    alive $W/netheal.pid && return 0
+    ( net_heal "$1"; rm -f $W/netheal.pid ) </dev/null >>$LOG 2>&1 &
+    echo $! > $W/netheal.pid
+}
+# 看门狗每轮（没冻结时）调：Kindle 的网络变了 → 查；用着的时候每 NET_CHECK_S 秒查一次（屏保 / 冻结时不查）
+net_watch_tick() {
+    [ -f $W/booted ] || return 0
+    nw_s=$(net_sig); nw_now=$(cut -d. -f1 ${NET_UPTIME:-/proc/uptime})
+    if [ "$nw_s" != "$(cat $W/net.sig 2>/dev/null)" ]; then
+        [ -f $W/net.sig ] || { echo "$nw_s" > $W/net.sig; echo "$nw_now start" > $W/net.last; return 0; }   # 这次运行的第一轮：只记下来
+        echo "$nw_s" > $W/net.sig
+        [ "$nw_s" = none ] || { t "net: kindle network changed: $nw_s"; net_heal_kick change; }
+        return 0
+    fi
+    [ "${NET_CHECK_S:-600}" -gt 0 ] 2>/dev/null || return 0
+    [ "$(cat $W/sleep.cur 2>/dev/null)" = saver ] && return 0
+    nw_l=$(cut -d' ' -f1 $W/net.last 2>/dev/null)
+    [ $((nw_now - ${nw_l:-0})) -ge ${NET_CHECK_S:-600} ] || return 0
+    echo "$nw_now pending" > $W/net.last
+    [ "$nw_s" = none ] || net_heal_kick periodic
+}
+# chroot（hostnet）模式：系统镜像里的 netd 换成包里修好的那份（bin/netd-hostnet；clearTetheringRules 死循环，见上）。
+# 内容一样就什么都不做；换不成只记日志（老 netd 还能用，只是断网后要靠上面的检查兜底）。
+netd_hostnet_fix() {
+    hostns || return 0
+    [ -f $VD/bin/netd-hostnet ] && [ -f $R/system/bin/netd ] || return 0
+    cmp -s $VD/bin/netd-hostnet $R/system/bin/netd && return 0
+    if cp $VD/bin/netd-hostnet $R/system/bin/netd.new && chmod 755 $R/system/bin/netd.new && mv -f $R/system/bin/netd.new $R/system/bin/netd; then
+        t "hostns: netd replaced with the fixed hostnet netd (no more hang when wlan0 goes away)"
+    else
+        rm -f $R/system/bin/netd.new; t "hostns: could not replace netd (read-only system?): keeping the old one"
+    fi
+    return 0
 }

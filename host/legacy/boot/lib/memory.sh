@@ -23,15 +23,31 @@ overcommit_restore() {
 # ActivityManager often logs "Error writing to lowmemorykiller socket", and the
 # stock large-screen table stays (adj0=72MB, adj100=92MB, adj200=108MB).
 # User 092A032524017 (Kindle 2022 / KT5, 485 MB): 8× foreground WeRead kills.
+# 停止 / 返回 Kindle 时要把 Kindle 原来的那一套改回去（lmk_kernel_restore，zram_restore 调用）：以前只改不回，Android 停了以后
+# Kindle 自己一直带着 8 MB 的门槛跑到下次重启——内存紧时内核 LMK 不再提前杀后台进程，Kindle 的界面 / 书库程序被拖进
+# 反复回收、卡死，严重时看门狗整机重启（2026-11-21 社区“用完微信读书 Kindle 无限重启”排查时发现；不是重启循环的直接原因）。
+LMK_SYS=${LMK_SYS:-/sys/module/lowmemorykiller/parameters}
 lmk_kernel_tune() {
-    mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    mt=$(awk '/^MemTotal:/{print $2}' ${LMK_MEMINFO:-/proc/meminfo})
     [ -n "$mt" ] && [ "$mt" -lt 700000 ] || return 0
-    mf=/sys/module/lowmemorykiller/parameters/minfree
-    ad=/sys/module/lowmemorykiller/parameters/adj
+    mf=$LMK_SYS/minfree
+    ad=$LMK_SYS/adj
     [ -f "$mf" ] || return 0
-    echo 2048,3072,4096,5120,6144,8192 > "$mf" 2>/dev/null || return 1
+    # 第一次改之前记下 Kindle 原来的值（看门狗每一轮都会再调一次：已经记过就不再记，免得把我们自己的值当成原值）
+    lk_new=; [ -f $W/lmk.state ] || { { cat "$mf"; [ -f "$ad" ] && cat "$ad"; } > $W/lmk.state.tmp 2>/dev/null && mv -f $W/lmk.state.tmp $W/lmk.state && lk_new=1; }
+    echo 2048,3072,4096,8192,14336,16384 > "$mf" 2>/dev/null || return 1
     [ -f "$ad" ] && echo 0,100,200,300,900,906 > "$ad" 2>/dev/null || true
-    t "lmk: kernel minfree 8/12/16/20/24/32MB (was stock 72/92/108MB class)"
+    [ -n "$lk_new" ] && t "lmk: kernel minfree 8/12/16/32/56/64MB (stock $(head -n 1 $W/lmk.state) saved, restored on stop)"
+    return 0
+}
+lmk_kernel_restore() {
+    [ -f $W/lmk.state ] || return 0
+    { read lk_mf; read lk_ad; } < $W/lmk.state
+    # 先 adj 后 minfree（内核按下标配对；两组数量一样，顺序无所谓，只要两个都写回）
+    [ -n "$lk_ad" ] && [ -f $LMK_SYS/adj ] && echo "$lk_ad" > $LMK_SYS/adj 2>/dev/null
+    [ -n "$lk_mf" ] && echo "$lk_mf" > $LMK_SYS/minfree 2>/dev/null && t "lmk: kernel minfree restored to the Kindle's $lk_mf"
+    rm -f $W/lmk.state
+    return 0
 }
 
 # heap + low_ram props. Must run before the container starts (build.prop is read by zygote).
@@ -63,6 +79,9 @@ heap_fix() {
         # 慢机型开机时盘很忙，这些报告把桌面主线程卡住，HostService 启动超时 ANR（pw2-5122 模拟器的 traces：main 停在
         # handleApplicationStrictModeViolation）。关掉 StrictMode 的调试报告。
         _prop persist.sys.strictmode.disable true
+        # 换了系统镜像后第一次开机 PackageManager 给所有应用重新 dexopt（pm.dexopt.first-boot，镜像里是 interpret-only）：装了番茄这类
+        # 200 MB 以上 dex 的应用时要几百 MB，开机卡死。改成 verify-at-runtime，之后 compile.sh 空闲时再编（compile_low_big）。
+        [ "${COMPILE_BIG_LOW:-on}" = off ] || _prop pm.dexopt.first-boot verify-at-runtime
         t "low ram ${mt}kB: heap ${HEAP_START:-8m}/$hg/$hs + ro.config.low_ram=true"
     else
         if grep -q '^dalvik.vm.heapgrowthlimit=128m$' "$f"; then
@@ -142,6 +161,7 @@ zram_on() {
 }
 zram_restore() {
     overcommit_restore
+    lmk_kernel_restore
     tune_restore
     swapfile_off
     [ -f $W/zram.state ] || return 0

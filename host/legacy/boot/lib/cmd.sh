@@ -3,6 +3,19 @@
 # 一行一条：exit stop restart diag diag-upload feedback clear invert status apply | light N | warmth N | wifi 0|1
 #   compile all|<包> | localupdate check|install（完整列表见 docs/host-settings.md）
 numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
+# 调亮度（桌面面板的亮度条、管理网页、优化建议都走这里；port of 066674db）。自动亮度开着（powerd flAuto=1，Oasis 2 / 3 有光线传感器）
+# 时 powerd 隔一会儿就按传感器把亮度改回去，看起来就是“调了没反应”。手动调了就是要手动：先把自动关掉。设完读回来，对不上就记一行。
+light_set() {
+    ls_p=com.lab126.powerd; ls_a=
+    if [ "$(lipc-get-prop $ls_p flAuto 2>/dev/null)" = 1 ]; then
+        lipc-set-prop -i $ls_p flAuto 0 2>/dev/null && ls_a=1 && t "light: auto brightness was on (powerd flAuto=1), turned it off for the manual level $1"
+    fi
+    lipc-set-prop -i $ls_p flIntensity "$1" >/dev/null 2>&1 || { t "light $1: lipc-set-prop flIntensity failed"; return 1; }
+    ls_g=$(lipc-get-prop $ls_p flIntensity 2>/dev/null)
+    [ "$ls_g" = "$1" ] || t "light $1: powerd reads back '$ls_g' (raw $(lipc-get-prop $ls_p flRawIntensity 2>/dev/null))"
+    [ -z "$ls_a" ] || status_write      # 面板上的“自动”勾掉
+    return 0
+}
 # 管理网页的请求（SSH、截屏、日志、占用、自动更新）：先校验来源再做，见 webadmin.sh
 [ -f "$VD/boot/lib/webadmin.sh" ] && . "$VD/boot/lib/webadmin.sh"
 # 每个应用的显示设置（前台应用 → 显示参数，三个宿主共用一份，见 appprof.sh）
@@ -241,7 +254,7 @@ cmd_listen() {
         invert)
             cur=$(sed -n 's/^KFB_INVERT=//p' $X/settings 2>/dev/null); [ "$cur" = 1 ] && n=0 || n=1
             echo "KFB_INVERT=$n" > $X/ctl/settings.new; settings_apply ;;
-        light)   numeric "$a" && lipc-set-prop -i com.lab126.powerd flIntensity "$a" && { [ "$a" = 0 ] && fl_off_sysfs; true; } ;;
+        light)   numeric "$a" && light_set "$a" && { [ "$a" = 0 ] && fl_off_sysfs; true; } ;;
         lightauto) case "$a" in 0|1) lipc-set-prop -i com.lab126.powerd flAuto "$a" 2>/dev/null; status_write ;; esac ;;   # 自动调整亮度（有光线传感器的机型）
         warmth)  numeric "$a" && lipc-set-prop -i com.lab126.powerd currentAmberLevel "$a" ;;
         sleeptime) numeric "$a" && [ "$a" -ge 60 ] && lipc-set-prop -i com.lab126.powerd screenSaverTimeout "$a" ;;

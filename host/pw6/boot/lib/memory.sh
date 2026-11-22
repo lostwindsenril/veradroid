@@ -34,9 +34,9 @@ lmk_kernel_tune() {
     [ -f "$mf" ] || return 0
     # 第一次改之前记下 Kindle 原来的值（看门狗每一轮都会再调一次：已经记过就不再记，免得把我们自己的值当成原值）
     lk_new=; [ -f $W/lmk.state ] || { { cat "$mf"; [ -f "$ad" ] && cat "$ad"; } > $W/lmk.state.tmp 2>/dev/null && mv -f $W/lmk.state.tmp $W/lmk.state && lk_new=1; }
-    echo 2048,3072,4096,5120,6144,8192 > "$mf" 2>/dev/null || return 1
+    echo 2048,3072,4096,8192,14336,16384 > "$mf" 2>/dev/null || return 1
     [ -f "$ad" ] && echo 0,100,200,300,900,906 > "$ad" 2>/dev/null || true
-    [ -n "$lk_new" ] && t "lmk: kernel minfree 8/12/16/20/24/32MB (stock $(head -n 1 $W/lmk.state) saved, restored on stop)"
+    [ -n "$lk_new" ] && t "lmk: kernel minfree 8/12/16/32/56/64MB (stock $(head -n 1 $W/lmk.state) saved, restored on stop)"
     return 0
 }
 lmk_kernel_restore() {
@@ -73,13 +73,45 @@ heap_fix() {
         _prop ro.config.low_ram true
         _prop ro.config.max_starting_bg 2
         _prop ro.sys.fw.bg_apps_limit 2
+        # 换了系统镜像后第一次开机 PackageManager 给所有应用重新 dexopt（pm.dexopt.first-boot，镜像里是 interpret-only）：装了番茄这类
+        # 200 MB 以上 dex 的应用时要几百 MB，开机卡死。改成 verify-at-runtime，之后 compile.sh 空闲时再编（compile_low_big）。
+        # （models/ram-512.conf 的 #@prop 不行：安装器不拷 models/，那一节从来没生效过）
+        [ "${COMPILE_BIG_LOW:-on}" = off ] || _prop pm.dexopt.first-boot verify-at-runtime
         t "low ram ${mt}kB: heap 8/128/192m + ro.config.low_ram=true"
     else
         if grep -q '^dalvik.vm.heapgrowthlimit=128m$' "$f"; then
             sed -i 's/^dalvik.vm.heapgrowthlimit=128m$/dalvik.vm.heapgrowthlimit=256m/; s/^dalvik.vm.heapsize=256m$/dalvik.vm.heapsize=512m/' "$f" \
                 && t "heap limit raised to 256m/512m (was 128m)"
         fi
+        heap_va_fix "$f"
     fi
+}
+
+# 32 位应用的地址空间（ARMv7 内核 3G/1G：每个进程 3 GB）。ART 给 Java 堆按 heapsize 预留两块一样大的地址空间：主堆和
+# “后台整理”（HomogeneousSpaceCompact）用的备用堆。heapsize=512m 时每个应用一开就占 1 GB 地址（测试机上番茄刚到隐私弹窗：
+# memfd:ashmem-dalvik-main 1024 MB，VmSize 1.9 GB）。番茄登录 / 书城这类线程多、插件多的应用再加上 WebView、几百个线程栈，
+# 地址用完：创建线程失败（“thread constructor failed: Try again”，SIGABRT）、CursorWindow 映射失败（error -12）——
+# 用户诊断（KT6 1 GB）里番茄就是这样闪退的，物理内存还有富余（overcommit=1）。
+# 后台 GC 改用 CMS、关掉 OOM 时的整理，ART 就不建备用堆：每个应用省 512 MB 地址，堆上限（heapsize）不变。
+# 512 MB 机型不改（heapsize 192m，备用堆只占 192 MB；后台整理能让缓存进程少占实际内存，那边更要紧）。
+# 设置 ART_HSPACE=1 恢复原样（两行都删掉）。build.prop 在启动前改，下次启动 Android 生效。
+heap_va_fix() { # build.prop
+    hv_f=$1
+    if [ "${ART_HSPACE:-0}" = 1 ]; then
+        grep -q -e '^dalvik.vm.backgroundgctype=CMS$' -e '^dalvik.vm.extra-opts=-XX:DisableHSpaceCompactForOOM$' "$hv_f" || return 0
+        grep -v -e '^dalvik.vm.backgroundgctype=CMS$' -e '^dalvik.vm.extra-opts=-XX:DisableHSpaceCompactForOOM$' "$hv_f" > "$hv_f.vdtmp" \
+            && cat "$hv_f.vdtmp" > "$hv_f" && t "art: background heap compaction back on (ART_HSPACE=1)"
+        rm -f "$hv_f.vdtmp"
+        return 0
+    fi
+    # 镜像里已经有别的 extra-opts / 后台 GC：不去覆盖
+    grep -q '^dalvik.vm.extra-opts=' "$hv_f" && ! grep -q '^dalvik.vm.extra-opts=-XX:DisableHSpaceCompactForOOM$' "$hv_f" && return 0
+    grep -q '^dalvik.vm.backgroundgctype=' "$hv_f" && ! grep -q '^dalvik.vm.backgroundgctype=CMS$' "$hv_f" && return 0
+    hv_n=0
+    grep -q '^dalvik.vm.backgroundgctype=CMS$' "$hv_f" || { echo "dalvik.vm.backgroundgctype=CMS" >> "$hv_f" && hv_n=1; }
+    grep -q '^dalvik.vm.extra-opts=-XX:DisableHSpaceCompactForOOM$' "$hv_f" || { echo "dalvik.vm.extra-opts=-XX:DisableHSpaceCompactForOOM" >> "$hv_f" && hv_n=1; }
+    [ $hv_n = 1 ] && t "art: no backup heap space (background GC CMS): 512 MB less address space per app"
+    return 0
 }
 
 zram_on() {

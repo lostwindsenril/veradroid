@@ -64,7 +64,8 @@ adb_sh() {
     # Refresh into a live container; never run host sh if vd_in fails (empty prefix).
     pref=$(vd_in) || return 1
     [ -n "$pref" ] || return 1
-    $pref /system/bin/sh -c "export PATH=/system/bin:/system/xbin ANDROID_DATA=/data ANDROID_ROOT=/system; $*"
+    ( type vd_art_stack >/dev/null 2>&1 && vd_art_stack
+      $pref /system/bin/sh -c "export PATH=/system/bin:/system/xbin ANDROID_DATA=/data ANDROID_ROOT=/system; $*" )
 }
 # 带时限的 adb_sh：adb_sh_t <秒> 命令。命令监听（cmd.sh）和看门狗都是一个循环一件一件做，里面同步问 Android 的地方
 # （settings put、service call、dumpsys、ndc、screencap）要等 system_server / netd / surfaceflinger 回答。它们卡住时
@@ -75,7 +76,8 @@ adb_sh_t() {
     tt=$1; shift
     pref=$(vd_in) || return 1
     [ -n "$pref" ] || return 1
-    vd_timeout "$tt" $pref /system/bin/sh -c "export PATH=/system/bin:/system/xbin ANDROID_DATA=/data ANDROID_ROOT=/system; $*"
+    ( type vd_art_stack >/dev/null 2>&1 && vd_art_stack
+      vd_timeout "$tt" $pref /system/bin/sh -c "export PATH=/system/bin:/system/xbin ANDROID_DATA=/data ANDROID_ROOT=/system; $*" )
 }
 
 # 包是否已安装：读 PackageManager 自己维护的 packages.list（宿主上直接读文件，不用为一次查询起一个 JVM）

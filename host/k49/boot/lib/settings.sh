@@ -172,7 +172,11 @@ settings_load() {
         # Scribe（barolo / MT8113 Bellatrix3，也不是 Bellatrix4）：同一个 FBInk 行为。用户反馈（KS1，1.00）“有些应用里的菜单很糊”：
         # 菜单 / 弹窗只占屏幕一小块 → DU（两级）+ Y4 抖动，没有补刷。和 PW5 同样的三项默认值。
         ks|ks2) KFB_DITHER=0; KFB_REAGL_MIN=50; KFB_CLEAN=600 ;;
+        oa2) KFB_DITHER=0; KFB_SETTLE=40; PAGE_KEYS=gpio-keys; PAGE_KEYS_SWAP=1; FL_COLD=max77796-bl; FL_WARM=none ;;
+        ko3) KFB_DITHER=0; KFB_SETTLE=40; PAGE_KEYS=gpio-keys; PAGE_KEYS_SWAP=1; FL_COLD=lm3697-bl1; FL_WARM=lipc ;;
     esac
+    _m_id=$(cat "$SYS/model" 2>/dev/null)
+    [ -n "$_m_id" ] && [ -f "$VD/models/$_m_id.conf" ] && . "$VD/models/$_m_id.conf" 
     # 512 MB 机型（实际内存 < 700 MB，和 lowmem_ram 一样，不看 LOWMEM 开关）：一页共享缓冲 + RGB565 窗口缓冲默认开（省 ~8 + ~8 MB）。
     # 只是默认值：机型文件和 settings.conf 照样能改（docs/framework-project.md §9.9）。
     if lowmem_ram; then KFB_ONEPAGE=1; KFB_RGB565=1; fi

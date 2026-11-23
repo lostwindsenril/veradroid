@@ -760,6 +760,7 @@ run_in_ns() {
         cd $R && pivot_root . old && cd / && umount -l /old && rmdir /old 2>/dev/null
         exec /init
     fi
+    vd_art_stack $R/system/build.prop
     if [ -n "$HOSTNS" ]; then
         cd $R && exec chroot $R /init --second-stage
     fi

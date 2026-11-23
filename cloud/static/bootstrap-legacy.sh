@@ -1074,7 +1074,7 @@ vd_cands() { # 主站地址 → 候选地址（每行一个：镜像按顺序在
 vd_pick() {
     p_o=$1; p_best=; p_bs=-1; p_seg=1; p_why=
     for p_u in $(vd_cands "$p_o"); do
-        p_w=$(curl_do -s -o /dev/null -r 0-262143 --connect-timeout 8 --max-time 12 -w '%{http_code} %{size_download} %{time_total}' "$p_u" 2>/dev/null) || p_w="000 0 0"
+        p_w=$(curl_do -sL -o /dev/null -r 0-262143 --connect-timeout 8 --max-time 12 -w '%{http_code} %{size_download} %{time_total}' "$p_u" 2>/dev/null) || p_w="000 0 0"
         set -- $p_w
         # 206 = 支持 Range；镜像必须支持（不然多半是错误页 / 跳转页），主站 200 也行（不分段）
         case "$1" in 206) ;; 200) [ "$p_u" = "$p_o" ] || continue ;; *) vlog "probe: $p_u -> HTTP $1"; continue ;; esac
@@ -1127,7 +1127,7 @@ vd_fetch() {
         [ $((f_a + f_h)) -le $((f_b + 1)) ] || { rm -f "$f_d/$f_i"; f_h=0; }   # 比这一段还长：坏了，重下这段
         if [ $((f_a + f_h)) -le $f_b ]; then
             # 输出用 >> 接在已下好的后面；--stderr 带上目录名，安装器清理残留进程时能按目录找到它
-            curl_do -fsS --connect-timeout 20 --max-time 1800 --speed-limit 1024 --speed-time 30 --stderr "$f_d/err.$f_i" \
+            curl_do -fsSL --connect-timeout 20 --max-time 1800 --speed-limit 1024 --speed-time 30 --stderr "$f_d/err.$f_i" \
                 -r $((f_a + f_h))-$f_b "$f_src" >> "$f_d/$f_i" &
             f_pids="$f_pids $!"
         fi
@@ -1645,10 +1645,9 @@ remove_offline_package() {
         veradroid-pw6-*.tar.gz|veradroid-k49-*.tar.gz|veradroid-legacy-*.tar.gz) [ -f "$VD_OFFLINE_BUNDLE" ] && rm -f "$VD_OFFLINE_BUNDLE" 2>/dev/null || true ;;
     esac
     if [ -n "${VD_HELPER:-}" ] && [ -f "$VD_HELPER" ] && [ "$(basename "$VD_HELPER")" = bootstrap.sh ]; then
-        rm -f "$VD_HELPER" 2>/dev/null || true
-        for hs in "$VD_HELPER.sdr" "${VD_HELPER%.sh}.sdr"; do
-            if [ -d "$hs" ] && [ ! -L "$hs" ]; then rm -rf "$hs" 2>/dev/null || true; fi
-        done
+        # 这个文件就是正在执行的脚本：在 fuse.fsp / vfat 上立刻删掉，sh 读剩下的部分会读到半截（误报“安装失败（代码 2）”）。
+        # 和 remove_installer_later 一样，等这个进程退出后再删。
+        ( cd / && setsid sh -c 'sleep 30; rm -f "$1"; for d in "$1.sdr" "${1%.sh}.sdr"; do [ -d "$d" ] && [ ! -L "$d" ] && rm -rf "$d"; done; sync' sh "$VD_HELPER" ) </dev/null >/dev/null 2>&1 &
     fi
     if is_offline_readme "$od/README.txt"; then
         rm -f "$od/README.txt" 2>/dev/null || true
@@ -2132,7 +2131,9 @@ install_recover() {
         if [ -d "$SYS/rootfs.bak.$st" ]; then
             [ -e "$SYS/rootfs" ] && mv "$SYS/rootfs" "$SYS/rootfs.failed.$st"
             mv "$SYS/rootfs.bak.$st" "$SYS/rootfs"
-            echo "[$(date '+%F %T')] interrupted install $st: rolled back to the previous version" >> /mnt/base-us/veradroid/logs/install-detail.log
+            # 版本号也回到旧的那一版（$SYS/version 可能已经写成了新版本：以前回退后安装器认为“已是最新”，再也不升级）
+            [ -s "$VD/version" ] && cp "$VD/version" "$SYS/version" 2>/dev/null
+            echo "[$(date '+%F %T')] interrupted install $st: rolled back to the previous version ($(cat "$VD/version" 2>/dev/null))" >> /mnt/base-us/veradroid/logs/install-detail.log
         else
             rm -f "$VD/version" "$SYS/version"
             echo "[$(date '+%F %T')] interrupted install $st: program dir restored, system image incomplete -> needs reinstall" >> /mnt/base-us/veradroid/logs/install-detail.log

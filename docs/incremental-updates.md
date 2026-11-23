@@ -57,27 +57,3 @@ zstd 只有 5.20 固件自带，3.0 / 4.1 老机型没有；xz 解码所有机�
 大小 + 修改时间；修改时间来自镜像 tar，解压和增量组装都保留；slim 挪出去、镜像里确实没有的应用按原路径算回来；VeraHome / VeraIME 不算）。
 一样 → 保留缓存，只删 VeraHome / VeraIME 的缓存项（安装器可能换了这两个 APK）；不一样或算不出来 → 照旧整个清
 （旧缓存里可能有另一个 Settings.apk 的 dex：任何系统 APK / jar 变了都会让指纹变）。VD_FACTORY=1 照旧清。
-
-## 老机型（legacy，2026-11-19，perf/legacy-delta）
-
-以前老机型的每次更新都整包下载（147 MB，走 Cloudflare，没有镜像、不分段）。现在 `bootstrap-legacy.sh` 和新机型的 `bootstrap.sh`
-用同一份下载代码和增量代码：两个文件里 `# BEGIN vd_dl … # END vd_dl`、`# BEGIN vd_parts … # END vd_parts` 之间一字不差
-（`tests/dl-block-test.sh` 比较），改的时候两边一起改。老安装器没有整屏进度画面，`vp_step` / `ui_run` 等在它里面是只写一行字的替身。
-
-- 打包：`pack-legacy.sh` 本来就调 mkparts（对照 releases 里最新的三个老机型整包）；打包时线上已有同名部件的
-  直接用线上那份。部件按内容命名，但重新打出来的字节会不同（新拷的文件 tar 里时间不一样），
-  publish 不允许替换已发布的部件。
-- 发布：`publish-legacy.sh` 检查索引和每个部件（sha256、大小、版本），先拷部件再写元数据，元数据带 `parts` 三个字段。
-- 设备：解开的系统镜像在 loop 系统盘（ext3 / ext4）里，`cp -al` 硬链接旧镜像只多占变了的文件；loop 机型安装器照旧先删旧镜像
-  （删的只是链接）。下载目录在 vfat 的用户分区上：部件解开后没有权限位，组装时 `vd_put` 一律按目标清单 chmod / chown，最后逐项核对。
-- 宿主每次开机原地改的 `system/build.prop`（memory.sh 的 heap_fix 追加、props、slim 块）和 `init.kindle.rc`（slim 块）：装好的镜像里
-  永远不是原版。现在它们算 vol 文件（在 vol 部件里、不进差量、装完存进 vd-pristine、组装时拷贝不链接）。以前同一个镜像的两个版本之间
-  （0.8.10 → 0.8.11 就是）没有差量部件，这两个文件只能从整个镜像部件（97 MB）里来——新机型下一次镜像不变的版本也会这样。
-
-### 老机型一次更新实际下多少（按真实索引算，`upd-bytes` 的算法 = 安装器挑选部件的算法）
-
-| 更新 | 以前（整包） | 增量（第一次，本机没有 vd-pristine） | 之后（有 vd-pristine） |
-|---|---|---|---|
-| legacy 0.8.10 → 0.8.11（镜像不变） | 147 MB | 4.6 MB（apks 2.3 + boot / entries / kual / top 0.2 + vol 2.3） | 2.4 MB |
-| legacy 0.8.11 → 0.8.12-test（只改宿主脚本 + 镜像两个小文件） | 147 MB | 2.4 MB（boot 0.15 + 差量 0.2 KB + vol 2.3） | 0.2 MB |
-| 新机型 pw6 0.98 → 0.99（测试机实测日志） | 141 MB | 4.5 MB | — |

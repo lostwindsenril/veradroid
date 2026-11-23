@@ -185,6 +185,7 @@ var_guard() {
 
 # 内存盘（/dev/shm，占的是内存）里的日志：显示桥每刷一次写一行，开着几天能长到几 MB。超过上限就留后一半
 log_cap() {   # log_cap <文件> <字节>
+    [ -f "$1" ] || return 0
     sz=$(wc -c < "$1" 2>/dev/null || echo 0)
     [ "$sz" -gt "$2" ] 2>/dev/null || return 0
     tail -c $(($2 / 2)) "$1" > "$1.tmp" 2>/dev/null && cat "$1.tmp" > "$1"; rm -f "$1.tmp"
@@ -228,7 +229,7 @@ helpers_supervise() {
 wd_guard() {
     wg_n=0
     while :; do
-        sleep ${WD_GUARD_S:-30}
+        if [ -z "$WD_GUARD_S" ] && [ -f $W/saver_frozen ]; then sleep 120; else sleep ${WD_GUARD_S:-30}; fi
         kill -0 "$P" 2>/dev/null || break
         [ -f $W/frozen ] || [ -f $W/restarting ] && break
         wg_s=$(cat /tmp/veradroid-stop.pid 2>/dev/null); [ -n "$wg_s" ] && kill -0 "$wg_s" 2>/dev/null && break
@@ -261,24 +262,40 @@ bat_poke_tick() {
 host_oom_protect() {
     [ -n "${HOST_OOM_ADJ--800}" ] || return 0
     for ho_n in cmd watchdog guard sleep input epd slirp vdkaf shutw; do
-        ho_p=$(cat $W/$ho_n.pid 2>/dev/null)
+        [ -r $W/$ho_n.pid ] || continue
+        ho_p=; read -r ho_p < $W/$ho_n.pid 2>/dev/null || true
         case "$ho_p" in ''|*[!0-9]*) continue ;; esac
-        [ "$(cat /proc/$ho_p/oom_score_adj 2>/dev/null)" = "${HOST_OOM_ADJ--800}" ] || echo "${HOST_OOM_ADJ--800}" > /proc/$ho_p/oom_score_adj 2>/dev/null
+        [ -r /proc/$ho_p/oom_score_adj ] || continue
+        ho_cur=; read -r ho_cur < /proc/$ho_p/oom_score_adj 2>/dev/null || true
+        [ "$ho_cur" = "${HOST_OOM_ADJ--800}" ] || echo "${HOST_OOM_ADJ--800}" > /proc/$ho_p/oom_score_adj 2>/dev/null
     done
     return 0
 }
 watchdog() {
-    # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
-    # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).
+    # PERF: poll every 120s while saver_frozen (60s while frozen) to cut host wakeups. FIFO cmd.sh still handles UI.
+    # MEM: re-apply kernel LMK each tick on low-RAM (<700MB) devices (lab126 can reset minfree); cache MemTotal once.
+    wd_mt=
+    if [ -r "${LMK_MEMINFO:-/proc/meminfo}" ]; then
+        while read -r wd_k wd_v _; do
+            [ "$wd_k" = "MemTotal:" ] && { wd_mt=$wd_v; break; }
+        done < "${LMK_MEMINFO:-/proc/meminfo}"
+    fi
+    wd_tick=0
     while :; do
-        if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then sleep_for=60; else sleep_for=20; fi
+        if [ -f $W/saver_frozen ]; then sleep_for=120
+        elif [ -f $W/frozen ]; then sleep_for=60
+        else sleep_for=20; fi
         sleep $sleep_for
         kill -0 $P 2>/dev/null || { t "system exited"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; break; }
-        lmk_kernel_tune 2>/dev/null || true
-        host_oom_protect
+        wd_tick=$((wd_tick + 1))
+        [ -n "$wd_mt" ] && [ "$wd_mt" -lt 700000 ] 2>/dev/null && { lmk_kernel_tune 2>/dev/null || true; }
+        # 低频维护（每 3 轮 = 60 秒；冻结时每轮已经 ≥60 秒）：减少前台阅读时的后台 fork
+        if [ $((wd_tick % 3)) -eq 1 ] || [ $sleep_for -ge 60 ]; then
+            host_oom_protect
+            log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
+        fi
         # 空闲冻结（idle.sh，IDLE_FREEZE）：冻 / 定时唤醒 / 放回 watchdog 线程。屏保冻结、返回 Kindle 时不管
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { type idle_tick >/dev/null 2>&1 && idle_tick; }
-        log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ] && [ ! -f $W/idlefz ]; then
             # 命令监听没了（FIFO 建不起来、被杀）：桌面的“返回 Kindle”、设置、手势全都没反应，只能重启 Kindle。重新起一个。
             alive $W/cmd.pid || { t "cmd listener gone, restarting it"; cmd_listen & echo $! > $W/cmd.pid; }

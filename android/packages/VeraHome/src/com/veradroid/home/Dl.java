@@ -162,14 +162,16 @@ final class Dl {
         if (planned != n) { clear(out); dir.mkdirs(); write(plan, (size + " " + n).getBytes("UTF-8")); }
         final long len = (size + n - 1) / n;
         final Exception[] err = new Exception[1];
+        final HttpURLConnection[] activeConns = new HttpURLConnection[n];
         List<Thread> ts = new ArrayList<Thread>();
         for (int i = 0; i < n; i++) {
+            final int idx = i;
             final long a = i * len, b = Math.min(size, a + len) - 1;
             final File f = new File(dir, String.valueOf(i));
             if (f.length() > b - a + 1) f.delete();
             if (a + f.length() > b) continue;
             Thread t = new Thread(new Runnable() { @Override public void run() {
-                try { range(src, f, a + f.length(), b, meter); }
+                try { range(src, f, a + f.length(), b, meter, activeConns, idx); }
                 catch (Exception e) { synchronized (err) { if (err[0] == null) err[0] = e; } }
             }}, "StoreSeg" + i);
             t.start(); ts.add(t);
@@ -180,7 +182,13 @@ final class Dl {
             for (Thread t : ts) { t.join(1000); if (t.isAlive()) { alive = true; break; } }
             long h = have(out);
             if (p != null) p.on(h, size, mirror);
-            if (meter != null && !meter.cancel) { meter.sample(h); if (meter.slow()) meter.cancel = true; }
+            if (meter != null && !meter.cancel) {
+                meter.sample(h);
+                if (meter.slow()) {
+                    synchronized (activeConns) { meter.cancel = true; }
+                    abortActive(activeConns, ts);
+                }
+            }
         }
         if (meter != null && meter.cancel) {
             long r = Math.max(0, meter.rate());
@@ -212,9 +220,30 @@ final class Dl {
         dir.delete();
     }
 
+    private static void abortActive(HttpURLConnection[] activeConns, List<Thread> ts) {
+        HttpURLConnection[] snap;
+        synchronized (activeConns) {
+            snap = activeConns.clone();
+        }
+        for (HttpURLConnection c : snap) {
+            if (c != null) try { c.disconnect(); } catch (Throwable ignored) { }
+        }
+        for (Thread t : ts) {
+            try { t.interrupt(); } catch (Throwable ignored) { }
+        }
+    }
+
     /** Bytes from..to (inclusive) of url appended to f. */
-    private static void range(String url, File f, long from, long to, Meter meter) throws Exception {
+    private static void range(String url, File f, long from, long to, Meter meter, HttpURLConnection[] activeConns, int idx) throws Exception {
+        if (meter != null && meter.cancel) return;
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
+        synchronized (activeConns) {
+            if (meter != null && meter.cancel) {
+                try { h.disconnect(); } catch (Throwable ignored) { }
+                return;
+            }
+            activeConns[idx] = h;
+        }
         try {
             h.setConnectTimeout(20000); h.setReadTimeout(60000);
             h.setRequestProperty("User-Agent", "VeraDroid/Store");
@@ -230,9 +259,15 @@ final class Dl {
                     fo.write(buf, 0, r); left -= r;
                     if (meter != null && meter.cancel) return;      // the monitor gave up this source; the piece is resumed elsewhere
                 }
-            } finally { fo.close(); in.close(); }
+            } finally {
+                try { fo.close(); } catch (Exception ignored) { }
+                try { in.close(); } catch (Exception ignored) { }
+            }
             if (left > 0) throw new java.io.IOException("unexpected end of stream");
-        } finally { h.disconnect(); }
+        } finally {
+            synchronized (activeConns) { activeConns[idx] = null; }
+            try { h.disconnect(); } catch (Throwable ignored) { }
+        }
     }
 
     /** One connection, resuming after what out already holds. */

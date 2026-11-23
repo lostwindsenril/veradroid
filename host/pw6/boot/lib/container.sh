@@ -105,8 +105,11 @@ display_start() {
     rot_deg > $W/rotate
     # 以后能不能当场转 180：0 度启动时没传 --vw，可见宽 != 行宽（PW5 无 FBInk）的机器转了会偏 12 像素，只能重启
     if [ "$(rot_deg)" != 0 ] || [ -z "$viewVisWidth" ] || [ "$viewVisWidth" = "${viewWidth:-1272}" ]; then touch $W/rotate.live; else rm -f $W/rotate.live; fi
-    usleep 500000
-    t "display: bridge pid $(cat $W/epd.pid)"
+    # 等桥接建好共享缓冲和 FIFO（它打开 FIFO 时这两样都好了），最多 0.5 秒。以前固定睡 0.5 秒：真机上桥接几十毫秒就好了，
+    # 剩下的全算在开机里（perf/boot-path，tools/bench 的宿主日志时间线 "display: bridge pid"）
+    ds_p=$(cat $W/epd.pid); ds_i=0
+    while [ $ds_i -lt 25 ] && kill -0 "$ds_p" 2>/dev/null && ! ls -l /proc/$ds_p/fd 2>/dev/null | grep -q 'epd\.fifo'; do usleep 20000; ds_i=$((ds_i + 1)); done
+    t "display: bridge pid $ds_p (ready after $((ds_i * 20)) ms)"
 }
 display_stop() { alive $W/epd.pid && kill "$(cat $W/epd.pid)" 2>/dev/null; rm -f $W/epd.pid $W/rotate $W/rotate.live; }
 
@@ -515,7 +518,7 @@ container_start() {
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
     fstrim_defuse
     docs_snapshot         # 开机完成后 after_boot 拿它核对 Kindle 书库（docs_verify）
-    wc -l < $SYS/data/system/uiderrors.txt 2>/dev/null | tr -d ' ' > $W/uiderr.lines
+    if [ -f $SYS/data/system/uiderrors.txt ]; then wc -l < $SYS/data/system/uiderrors.txt | tr -d ' ' > $W/uiderr.lines; else echo 0 > $W/uiderr.lines; fi
     if hostns; then
         # chroot 模式同样要先进 freezer 组再 fork：以前这里只 freezer_setup，Android 的进程一个都不在组里，屏保 / 返回 Kindle 时
         # “冻结”的是一个空组（日志照样写 android frozen），Android 在屏保期间一直在跑（pw5-516211 模拟器：vd/cgroup.procs 为空，
@@ -536,10 +539,11 @@ container_start() {
     UPID=$!
     [ -d $FZ ] && freezer_leave
     P=
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    # 每 50 毫秒看一次（以前 200 毫秒），最多仍是 2 秒
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
         read -r P _ < /proc/$UPID/task/$UPID/children 2>/dev/null
         [ -n "$P" ] && break
-        usleep 200000
+        usleep 50000
     done
     [ -n "$P" ] || { t "container did not start"; return 1; }
     echo $P > $W/pid
@@ -556,11 +560,11 @@ binder_repair() {
     # mount --bind on the host path $R/dev/binder leaves a nested mount under
     # $SYS that stop/storage_umount must clear, or Kindle userstore unmount fails.
     p=$(cat $W/pid 2>/dev/null)
-    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null && [ -d /proc/$p/ns/mnt ]; then
-        nsenter -t "$p" -m -- /bin/sh -c '
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null && [ -e /proc/$p/ns/mnt ]; then
+        nsenter -t "$p" -m -- /system/bin/sh -c '
             target=/dev/binder
+            if [ -c "$target" ]; then chmod 666 "$target" 2>/dev/null; exit 0; fi
             if [ -d "$target" ]; then umount "$target" 2>/dev/null; rmdir "$target" 2>/dev/null; fi
-            if [ -c "$target" ] && [ -e /dev/vndbinder ]; then chmod 666 "$target" 2>/dev/null; exit 0; fi
             # Inside the container ns, /dev/vndbinder is the host bind (or missing).
             if [ -e /dev/vndbinder ]; then
                 chmod 666 /dev/vndbinder 2>/dev/null
@@ -675,6 +679,14 @@ run_in_ns() {
     for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing sys/kernel/debug; do
         [ -d $R/$d ] && mount -t tmpfs -o ro,size=4k tmpfs $R/$d
     done
+    # BatteryStatsService 的 KernelWakelockReader 每隔几分钟读 /proc/wakelocks 或 /d/wakeup_sources（/d -> /sys/kernel/debug）；
+    # 两者都不存在时 system_server 持续触发 Slog.wtf，向 /data/system/dropbox 写入大量 wtf 堆栈文件（用户诊断 实证）。
+    # 在只读空 tmpfs 中放一个 0 字节只读 wakeup_sources 即可彻底静音且保持宿主 debugfs 隔离。
+    if [ ! -e /proc/wakelocks ] && [ -d $R/sys/kernel/debug ]; then
+        mount -o remount,rw $R/sys/kernel/debug 2>/dev/null && \
+            : > $R/sys/kernel/debug/wakeup_sources && chmod 444 $R/sys/kernel/debug/wakeup_sources && \
+            mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+    fi
     # 测延迟用：/dev/shm/vd-tracefs 存在时，把 tracefs 给系统看（atrace / Trace 标记要在 zygote 起来之前就能打开）。
     # 只读空目录换成可写的小 tmpfs + tracefs；宿主的跟踪设置是共用的，测完删掉这个文件、重启安卓即恢复
     if [ -e /dev/shm/vd-tracefs ] && [ -d $R/sys/kernel/debug ]; then

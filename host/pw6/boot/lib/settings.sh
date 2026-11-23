@@ -7,6 +7,7 @@ settings_defaults() {
     LMK_MINFREE=auto       # lmkd 杀进程门槛：auto（按内存，见 memkeep.sh）| stock（原厂大屏表）| "页数:adj ..."（最多 6 对）
     MEM_KEEP=auto          # 桌面 / 输入法不换出（memory cgroup swappiness 0）：auto（>= 700 MB 机型）| on | off
     MEM_KEEP_APPS=         # 另外也不换出的应用（逗号分隔的包名）
+    BG_FREEZE=1            # 切换应用立即冻结后台第三方应用（SIGSTOP 0% CPU + 停止内存增长，切回秒速 SIGCONT 解冻；KEEPALIVE=1 除外）；0 = 关
     BG_STOP_MIN=0          # 后台应用定时停止：BG_STOP_APPS 里的应用离开前台超过这么多分钟就 force-stop，0 = 关
     BG_STOP_APPS=          # 逗号分隔的包名（桌面 / 输入法 / 前台应用永远不停）
     BOOT_BLOCK=1           # 1 = 第三方应用不许开机自启（pm disable 它们的开机广播接收器，闹钟 / 日历 / 待办类除外）；0 = 恢复（memkeep.sh）
@@ -32,7 +33,7 @@ settings_defaults() {
     KFB_SETTLE=40          # 显示：滑动 / 动画时合并中间帧，静止这么多毫秒后才刷（0 = 每帧都刷）
     KFB_MODE=0             # 显示：刷新方式 0 均衡 1 灰度最准 2 最快
     KFB_HOLD=70            # 显示：小于屏幕 3% 的首个变化（按钮高亮）暂缓这么多毫秒，和随后的整页变化合成一次刷新（0 = 不暂缓）
-    KFB_SMOOTH=0           # 显示：流畅度档位。0 = 不用档位（按下面各项单独的设置，和以前完全一样）；1 流畅优先；2 均衡；3 画质优先。
+    KFB_SMOOTH=2           # 显示：流畅度档位（默认 2 均衡，开箱即用）。0 = 自定义；1 快速；2 均衡；3 高清；4 极速 A2。
                            # 选了 1 / 2 / 3 时，档位决定 KFB_PACE / KFB_HOLD / KFB_CLEAN / KFB_SETTLE / KFB_MODE（smooth_apply），其余设置照旧
     KFB_PACE=0             # 显示：跟随面板。1 = 新的一帧落在还没刷完的区域上时先不发，等面板刷完只发最新画面（滚动 / 动画按面板自己的速度走，
                            # 停下来不用再等“刷新合并”的静止时间）；开着时 KFB_SETTLE 不起作用
@@ -54,7 +55,7 @@ settings_defaults() {
                            # 没有动画的翻页也要多等这么久，所以只给自己有翻页动画的应用设。0 = 关
     BOOST_MS=150           # 触摸加速：手指按下时把 CPU 最低频率提到最高，最后一根手指离开后这么多毫秒再放回。0 = 关
     BOOST_KHZ=0            # 触摸加速提到的频率（kHz）；0 = 当前允许的最高频率
-    IDLE_FREEZE=0          # 空闲冻结：没人碰屏幕、画面也不变超过这么多秒，就把 Android 冻住省电（一碰屏幕立刻解冻，lib/idle.sh）。0 = 关
+    IDLE_FREEZE=30         # 空闲冻结（默认 30 秒，开箱即用）：没人碰屏幕、画面也不变超过这么多秒，就把 Android 冻住省电（一碰屏幕立刻解冻，下载中自动跳过，lib/idle.sh）。0 = 关
     IDLE_WAKE=60           # 空闲冻结时每隔这么多秒解冻一次（闹钟、时钟、推送）
     IDLE_FREEZE_EXCLUDE=   # 这些应用在前台时不做空闲冻结（逗号分隔的包名，比如放音乐 / 朗读的应用）
     SCROLL_PX=20           # 触摸滚动：单指移动超过这么多像素（按 1272 宽的屏幕算，其他屏幕按宽度换算）算拖动。0 = 不发拖动信号
@@ -74,7 +75,7 @@ settings_defaults() {
     KFB_RGB565=0           # framework 项目：1 = 不透明的应用窗口用 RGB565 缓冲（每块缓冲省一半）。要 project/framework 的镜像
                            # 512 MB 机型默认 1（settings_load 里按内存设）；1 GB 机型上多花一点 CPU（测试机实测），默认 0
     VD_AUDIO=0             # framework 项目：0 = 不起 audioserver（应用的声音调用直接返回错误；镜像里本来就没有音频 HAL）。要 project/framework 的镜像。0.93 / 1.01 起默认 0
-    KFB_ANIM_MODE=1        # 显示：翻页动画 0 关 1 跟随手势 2 左 3 右 4 上 5 下
+    KFB_ANIM_MODE=0        # 显示：翻页动画 0 关（默认，无方向波纹同步整屏刷新）1 跟随手势 2 左 3 右 4 上 5 下
     KFB_ANIM_DIR=2         # 动画方向：0 下 1 上 2 左 3 右（翻下一页通常用左）
     KFB_ANIM_STEPS=12      # 动画步数：越大越慢越细腻（MTK 驱动要求 <= 刷新区域宽/高）
     KFB_ANIM_MIN=45        # 变化面积超过百分之多少才动画（微信读书翻页约 60%，给别的 App 留余量）
@@ -108,7 +109,7 @@ settings_defaults() {
     G_TWO_TAP_ACT=clear    # 双指轻点做什么（动作名同四角长按，见 action.sh / docs/host-settings.md）
     G_TWO_LONG_ACT=invert  # 双指长按 2 秒做什么
     KFB_PTKEYS=0           # 1 = 把 Kindle 的 kindle-input-pt 绑进 Android（旧做法；Android 会把它当成外接手写笔，每次触摸慢 72 ms，见 container.sh touch_setup）
-    SAVER_EXIT_H=0         # 锁屏（屏保）超过这么多小时，醒来时直接退出 Android 回到 Kindle（不解冻）；0 = 不退出。不额外定时唤醒（lib/sleep.sh saver_exit_check）
+    SAVER_EXIT_H=8         # 锁屏（屏保）超过这么多小时，醒来时直接退出 Android 回到 Kindle（默认 8 小时，避免隔夜耗电）；0 = 不退出（lib/sleep.sh saver_exit_check）
     USB_ASK=1              # Android 在前台时插上 USB 线：1 = 问要不要切到 USB 传输（回到 Kindle），0 = 不问（usb.sh）
     WIFI_PS=auto           # Wi-Fi 省电：auto（平时省电，传书 / 大量下载时临时关）| on（一直省电）| off（Android 运行时关）
     APP_COMPILE=auto       # 应用预编译（compile.sh）：auto | speed | off
@@ -170,9 +171,19 @@ settings_load() {
     # （否则在某个应用里打开面板会看到“翻页动画关 / 刷新合并关”，再点一下别的就把它存成全局了）。
     for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN; do eval "GLOB_$k=\$$k"; done
     [ -f "$SYS/settings.app" ] && . "$SYS/settings.app"       # 当前前台应用的显示参数（cmd.sh appdisp 写，已校验）
+    # 应用单独指定了 KFB_MODE（老配置）而没指定 KFB_SMOOTH 时，不让全局 KFB_SMOOTH 覆盖它，彻底避免全局与应用画质冲突
+    _am=$(sed -n 's/^KFB_MODE=//p' "$SYS/settings.app" 2>/dev/null)
+    _as=$(sed -n 's/^KFB_SMOOTH=//p' "$SYS/settings.app" 2>/dev/null)
+    _aw=$(sed -n 's/^KFB_SCROLLWFM=//p' "$SYS/settings.app" 2>/dev/null)
+    [ -n "$_am" ] && [ -z "$_as" ] && KFB_SMOOTH=0
     smooth_apply
-    # 应用单独选了刷新方式：档位（KFB_SMOOTH）不能把它盖掉
-    _am=$(sed -n 's/^KFB_MODE=//p' "$SYS/settings.app" 2>/dev/null); [ -n "$_am" ] && KFB_MODE=$_am
+    [ -n "$_am" ] && [ -z "$_as" ] && KFB_MODE=$_am
+    # 防残影兜底：应用单独选“灰度最准(1)”时不继承全局极速 A2 滚动；任何启用快刷/滚动 DU/A2 的场景都确保自动补刷和周期全清
+    [ "$KFB_MODE" = 1 ] && [ -z "$_aw" ] && KFB_SCROLLWFM=0
+    if [ "$KFB_MODE" = 2 ] || [ "${KFB_SCROLLDU:-0}" -gt 0 ] || [ "${KFB_SCROLLWFM:-0}" -gt 0 ]; then
+        [ "${KFB_CLEAN:-0}" = 0 ] && KFB_CLEAN=400
+    fi
+    [ "${KFB_SCROLLWFM:-0}" -gt 0 ] && [ "${KFB_GCN:-0}" = 0 ] && KFB_GCN=12
     # 512 MB devices: default to full exit when returning to Kindle, unless the
     # user already set RETURN_MODE. A frozen WeRead + Home sits on ~200 MB and
     # is what LMK then shoots (adj 0) when the user re-opens it.
@@ -188,13 +199,17 @@ settings_load() {
     if { [ -e "$VD/test-hostns" ] || [ ! -e /proc/self/ns/pid ]; } && [ "$RETURN_MODE" != off ]; then RETURN_MODE=off; RETURN_MODE_FORCED=hostns; fi
 }
 
-# 流畅度档位（KFB_SMOOTH，全局或某个应用单独设）：一个明确的选择，决定下面这几项；0 = 不用档位。
-# 数值来自 PW6 真机实测。
+# 流畅度档位（KFB_SMOOTH，全局与应用统一 4 档，参考文石刷新规则，全部自带去残影；0 = 自定义）：
+#   1 = 快速：DU 快刷跟手，停手 0.4s 自动 REAGL 补刷清残影
+#   2 = 均衡（推荐）：翻页高清 REAGL，局部快刷，停手 0.5s 自动补刷清残影
+#   3 = 高清（画质）：16 阶灰度优先，文字最锐利、无残影
+#   4 = 极速（A2）：拖动最高帧率，停手 0.35s 自动补刷 + 每 15 次非整页快刷自动整屏清残影
 smooth_apply() {
     case "$KFB_SMOOTH" in
-        1) KFB_PACE=1; KFB_HOLD=0;  KFB_CLEAN=500; KFB_REAGL_MIN=85; KFB_MODE=0 ;;                 # 流畅优先：马上快刷（DU），跟着面板走，停下来再补一遍灰度
-        2) KFB_PACE=1; KFB_HOLD=70; KFB_CLEAN=0;   KFB_REAGL_MIN=30; KFB_MODE=0 ;;                 # 均衡：按钮高亮和整页合成一次刷新；变化超过三成屏幕就直接用 REAGL
-        3) KFB_PACE=0; KFB_HOLD=70; KFB_CLEAN=0;   KFB_REAGL_MIN=30; KFB_MODE=3; KFB_SETTLE=120 ;; # 画质优先：驱动自动选波形（灰度内容用 GC16），合并中间帧
+        1) KFB_PACE=1; KFB_HOLD=0;  KFB_CLEAN=300; KFB_REAGL_MIN=85; KFB_MODE=0; KFB_SCROLLWFM=1; KFB_SCROLLDU=300; KFB_SCROLLDELAY=300; [ "${KFB_GCN:-0}" = 0 ] && KFB_GCN=18 ;;
+        2) KFB_PACE=1; KFB_HOLD=60; KFB_CLEAN=350; KFB_REAGL_MIN=30; KFB_MODE=0; KFB_SCROLLWFM=0; KFB_SCROLLDU=300; KFB_SCROLLDELAY=350; [ "${KFB_GCN:-0}" = 0 ] && KFB_GCN=20 ;;
+        3) KFB_PACE=0; KFB_HOLD=70; KFB_CLEAN=350; KFB_REAGL_MIN=25; KFB_MODE=1; KFB_SETTLE=100; KFB_SCROLLWFM=0; KFB_SCROLLDU=0 ;;
+        4) KFB_PACE=1; KFB_HOLD=0;  KFB_CLEAN=300; KFB_REAGL_MIN=90; KFB_MODE=0; KFB_SCROLLWFM=1; KFB_SCROLLDU=300; KFB_SCROLLDELAY=350; [ "${KFB_GCN:-0}" = 0 ] && KFB_GCN=12 ;;
         *) KFB_SMOOTH=0 ;;
     esac
 }
@@ -203,7 +218,7 @@ epd_send_smooth() { epd_send PACE ${KFB_PACE:-0}; epd_send CLEAN ${KFB_CLEAN:-0}
 
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE SAVER_EXIT_H USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && printf 'WEBVIEW_ALT_OK=%s\nWEBVIEW_HAVE=%s\nWEBVIEW_LIVE=%s\n' "$(lowmem_ram && echo 0 || echo 1)" "$(type webview_ok >/dev/null 2>&1 && webview_ok && echo 1 || echo 0)" "$(cat $W/webview.mode 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
@@ -217,15 +232,46 @@ settings_apply() {
     sfile=$W/settings.apply.$$.$(cut -d' ' -f1 /proc/uptime | tr -d .)
     mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
     touch $SYS/settings.conf
-    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK WEBVIEW; do
-        v=$(sed -n "s/^$k=\([0-9A-Za-z._,]*\)\$/\1/p" "$sfile" | tail -1)
-        [ -n "$v" ] || continue
-        case "$k=$v" in LOWMEM=auto|LOWMEM=on|LOWMEM=off|KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop|GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default|WEBVIEW=stock|WEBVIEW=alt|WEBVIEW=default) ;; LOWMEM=*|KINDLE_UI=*|GESTURE_HINT=*|WEBVIEW=*) continue ;; esac
-        grep -v "^$k=" $SYS/settings.conf > "$sfile.conf" 2>/dev/null
-        # KEY=default：删掉用户的设置，回到默认值（机型默认 / models/<id>.conf / settings_defaults）——桌面“恢复默认设置”用
-        [ "$v" = default ] || echo "$k=$v" >> "$sfile.conf"
-        mv -f "$sfile.conf" $SYS/settings.conf
-    done
+    if [ -s "$sfile" ]; then
+        sa_raw=" $(tr '\n' ' ' < "$sfile") "
+        sa_upd=""
+        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE SAVER_EXIT_H USB_ASK WEBVIEW; do
+            case "$sa_raw" in *" $k="*) ;; *) continue ;; esac
+            v=$(sed -n "s/^$k=//p" "$sfile" | tail -1)
+            [ -n "$v" ] || continue
+            case "$v" in *[!0-9A-Za-z._,]*) continue ;; esac
+            case "$k=$v" in
+                LOWMEM=auto|LOWMEM=on|LOWMEM=off) ;; LOWMEM=*) continue ;;
+                KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop) ;; KINDLE_UI=*) continue ;;
+                GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; GESTURE_HINT=*) continue ;;
+                WEBVIEW=stock|WEBVIEW=alt|WEBVIEW=default) ;; WEBVIEW=*) continue ;;
+            esac
+            sa_upd="${sa_upd}${k}=${v}
+"
+        done
+        if [ -n "$sa_upd" ]; then
+            awk -v upd_str="$sa_upd" '
+                BEGIN {
+                    n = split(upd_str, lines, "\n")
+                    for (i = 1; i <= n; i++) {
+                        eq = index(lines[i], "=")
+                        if (eq > 1) { k = substr(lines[i], 1, eq - 1); upd[k] = substr(lines[i], eq + 1); ord[++m] = k }
+                    }
+                }
+                {
+                    eq = index($0, "=")
+                    if (eq > 1 && (substr($0, 1, eq - 1) in upd)) next
+                    print
+                }
+                END {
+                    for (i = 1; i <= m; i++) {
+                        k = ord[i]
+                        if (upd[k] != "default") print k "=" upd[k]
+                    }
+                }
+            ' "$SYS/settings.conf" > "$sfile.conf" 2>/dev/null && mv -f "$sfile.conf" $SYS/settings.conf
+        fi
+    fi
     # 系统字体：值是路径（有 /、-、空格、中文），不走上面那条只认 [0-9A-Za-z._,] 的规则。只收三个字体目录里的文件（sysfont_host），
     # 不收引号、$、`、\；带单引号写进 settings.conf（root 会 source 它）。default / none = 删掉（原样字体）。重启 Android 生效。
     if grep -q '^SYSTEM_FONT=' "$sfile"; then
@@ -267,6 +313,7 @@ settings_apply() {
     type wifi_ps_tick >/dev/null 2>&1 && [ ! -f $W/frozen ] && wifi_ps_tick
     type time_format_apply >/dev/null 2>&1 && alive $W/pid && time_format_apply
     [ "$APP_COMPILE" = off ] && rm -f $W/compile.queue
+    [ "${BG_FREEZE:-1}" != 1 ] && type bg_thaw_all >/dev/null 2>&1 && bg_thaw_all
     t "settings applied: contrast=$KFB_CONTRAST dither=$KFB_DITHER flash=$KFB_FLASH invert=$KFB_INVERT lightf=${KFB_LIGHTF:-0} darken=${KFB_DARKEN:-0}"
     rotate_apply      # 旋转变了才有动作（cmd.sh）
 }

@@ -51,67 +51,71 @@ final class Books {
         ZipFile z = null;
         try {
             z = new ZipFile(f);
-            String container = readEntry(z, "META-INF/container.xml");
-            String opf = container == null ? null : attr(container, "rootfile", "full-path");
-            if (opf == null) {
-                java.util.Enumeration<? extends ZipEntry> en = z.entries();
-                while (en.hasMoreElements()) {
-                    String e = en.nextElement().getName();
-                    if (e.toLowerCase(Locale.US).endsWith(".opf")) { opf = e; break; }
-                }
-            }
-            if (opf == null) return i;
-            i.opf = opf;
-            String xml = readEntry(z, opf);
-            if (xml == null) return i;
-            String t = tag(xml, "dc:title");
-            String a = tag(xml, "dc:creator");
-            if (t != null && t.trim().length() > 0) i.title = t.trim();
-            if (a != null && a.trim().length() > 0) i.author = a.trim();
-            String base = opf.contains("/") ? opf.substring(0, opf.lastIndexOf('/') + 1) : "";
-
-            Map<String, String> items = new LinkedHashMap<String, String>();
-            Matcher im = Pattern.compile("(?is)<item\\b[^>]*>").matcher(xml);
-            while (im.find()) {
-                String id = attr(im.group(), "id");
-                String href = attr(im.group(), "href");
-                if (id != null && href != null) items.put(id, href);
-            }
-            String coverId = null;
-            Matcher meta = Pattern.compile("(?is)<meta\\b[^>]*name\\s*=\\s*[\"']cover[\"'][^>]*>").matcher(xml);
-            if (meta.find()) coverId = attr(meta.group(), "content");
-            String coverHref = null;
-            if (coverId != null) coverHref = items.get(coverId);
-            if (coverHref == null) {
-                Matcher cm = Pattern.compile("(?is)<item\\b[^>]*properties\\s*=\\s*[\"'][^\"']*cover-image[^\"']*[\"'][^>]*>").matcher(xml);
-                if (cm.find()) coverHref = attr(cm.group(), "href");
-            }
-            if (coverHref == null) {
-                for (String href : items.values()) {
-                    String lo = href.toLowerCase(Locale.US);
-                    if (lo.contains("cover") && (lo.endsWith(".jpg") || lo.endsWith(".jpeg") || lo.endsWith(".png") || lo.endsWith(".gif") || lo.endsWith(".webp"))) {
-                        coverHref = href; break;
-                    }
-                }
-            }
-            if (coverHref == null) {
-                for (String href : items.values()) {
-                    String lo = href.toLowerCase(Locale.US);
-                    if (lo.endsWith(".jpg") || lo.endsWith(".jpeg") || lo.endsWith(".png") || lo.endsWith(".gif") || lo.endsWith(".webp")) {
-                        coverHref = href; break;
-                    }
-                }
-            }
-            if (coverHref != null) {
-                String path = resolve(base, coverHref);
-                if (z.getEntry(path) != null) i.coverEntry = path;
-                else if (z.getEntry(coverHref) != null) i.coverEntry = coverHref;
-            }
+            fillEpubInfo(z, i);
         } catch (Throwable ignored) {
         } finally {
             try { if (z != null) z.close(); } catch (Throwable ignored) { }
         }
         return i;
+    }
+
+    private static void fillEpubInfo(ZipFile z, Info i) {
+        String container = readEntry(z, "META-INF/container.xml");
+        String opf = container == null ? null : attr(container, "rootfile", "full-path");
+        if (opf == null) {
+            java.util.Enumeration<? extends ZipEntry> en = z.entries();
+            while (en.hasMoreElements()) {
+                String e = en.nextElement().getName();
+                if (e.toLowerCase(Locale.US).endsWith(".opf")) { opf = e; break; }
+            }
+        }
+        if (opf == null) return;
+        i.opf = opf;
+        String xml = readEntry(z, opf);
+        if (xml == null) return;
+        String t = tag(xml, "dc:title");
+        String a = tag(xml, "dc:creator");
+        if (t != null && t.trim().length() > 0) i.title = t.trim();
+        if (a != null && a.trim().length() > 0) i.author = a.trim();
+        String base = opf.contains("/") ? opf.substring(0, opf.lastIndexOf('/') + 1) : "";
+
+        Map<String, String> items = new LinkedHashMap<String, String>();
+        Matcher im = Pattern.compile("(?is)<item\\b[^>]*>").matcher(xml);
+        while (im.find()) {
+            String id = attr(im.group(), "id");
+            String href = attr(im.group(), "href");
+            if (id != null && href != null) items.put(id, href);
+        }
+        String coverId = null;
+        Matcher meta = Pattern.compile("(?is)<meta\\b[^>]*name\\s*=\\s*[\"']cover[\"'][^>]*>").matcher(xml);
+        if (meta.find()) coverId = attr(meta.group(), "content");
+        String coverHref = null;
+        if (coverId != null) coverHref = items.get(coverId);
+        if (coverHref == null) {
+            Matcher cm = Pattern.compile("(?is)<item\\b[^>]*properties\\s*=\\s*[\"'][^\"']*cover-image[^\"']*[\"'][^>]*>").matcher(xml);
+            if (cm.find()) coverHref = attr(cm.group(), "href");
+        }
+        if (coverHref == null) {
+            for (String href : items.values()) {
+                String lo = href.toLowerCase(Locale.US);
+                if (lo.contains("cover") && (lo.endsWith(".jpg") || lo.endsWith(".jpeg") || lo.endsWith(".png") || lo.endsWith(".gif") || lo.endsWith(".webp"))) {
+                    coverHref = href; break;
+                }
+            }
+        }
+        if (coverHref == null) {
+            for (String href : items.values()) {
+                String lo = href.toLowerCase(Locale.US);
+                if (lo.endsWith(".jpg") || lo.endsWith(".jpeg") || lo.endsWith(".png") || lo.endsWith(".gif") || lo.endsWith(".webp")) {
+                    coverHref = href; break;
+                }
+            }
+        }
+        if (coverHref != null) {
+            String path = resolve(base, coverHref);
+            if (z.getEntry(path) != null) i.coverEntry = path;
+            else if (z.getEntry(coverHref) != null) i.coverEntry = coverHref;
+        }
     }
 
     /** A 2:3 cover thumbnail; null for TXT / failures. Call off the UI thread. */
@@ -122,7 +126,8 @@ final class Books {
             if (!n.endsWith(".epub")) return null;
             ZipFile z = new ZipFile(f);
             try {
-                Info info = info(f);
+                Info info = new Info();
+                fillEpubInfo(z, info);
                 if (info.coverEntry == null || info.coverEntry.length() == 0) return null;
                 ZipEntry e = z.getEntry(info.coverEntry);
                 if (e == null) return null;
@@ -198,9 +203,12 @@ final class Books {
         out.add(new Font("系统默认", null));
         addFont(out, "/system/fonts/DroidSansFallback.ttf", "系统黑体");
         addFont(out, "/system/fonts/DroidSansMono.ttf", "等宽");
+        org.json.JSONObject storeNames = null;
         for (String dir : new String[] { "/data/media/0/KindleFonts", "/data/media/0/Fonts" }) {
             File[] fs = new File(dir).listFiles();
             if (fs == null) continue;
+            boolean isUserFonts = dir.endsWith("/Fonts");
+            if (isUserFonts && storeNames == null) storeNames = FontStoreActivity.names();
             for (File f : fs) {
                 String n = f.getName().toLowerCase(Locale.US);
                 if (n.startsWith(".") || !(n.endsWith(".ttf") || n.endsWith(".otf") || n.endsWith(".ttc"))) continue;
@@ -210,7 +218,12 @@ final class Books {
                 if (dir.endsWith("/KindleFonts") && !wanted(n)) continue;
                 if (f.length() < 1024) continue;   // 空文件 / 没传完
                 // 字体商店下载的：用商店里的名字（文件名是给宿主用的字母数字）
-                String shop = dir.endsWith("/Fonts") ? FontStoreActivity.displayName(f.getName()) : null;
+                String shop = null;
+                if (isUserFonts && storeNames != null) {
+                    org.json.JSONObject jo = storeNames.optJSONObject(f.getName());
+                    String sn = jo == null ? "" : jo.optString("name");
+                    if (sn.length() > 0) shop = sn;
+                }
                 String label = shop != null ? shop : label(f.getName());
                 boolean dup = false;
                 for (Font o : out) if (o.name.equals(label)) { dup = true; break; }

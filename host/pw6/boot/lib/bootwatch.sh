@@ -75,12 +75,12 @@ boot_watch() {
     rm -f $W/bw.released; rmdir $W/splash.lock 2>/dev/null
     # 开机完成标记一出现就放开显示桥，不等下面这一轮（读 logcat、画进度、看 dexopt）做完：模拟器上一轮要好几秒，
     # 开机完成后桌面还要再等 5–11 秒（PW6 / PW5 模拟器）
-    ( while [ ! -f $X/ctl/booted ]; do kill -0 "$P" 2>/dev/null || exit 0; [ -f $W/bw.released ] && exit 0; usleep 250000; done
+    ( while [ ! -f $X/ctl/booted ]; do [ -n "$P" ] && kill -0 "$P" 2>/dev/null || exit 0; [ -f $W/bw.released ] && exit 0; usleep 250000; done
       bw_release ) </dev/null &
     bw_w=$!
     while [ $n -lt 180 ]; do
         n=$((n + 1))
-        kill -0 "$P" 2>/dev/null || break
+        [ -n "$P" ] && kill -0 "$P" 2>/dev/null || break
         # tail / sed 在宿主这边做（和 legacy 一样）：系统镜像里的 toybox tail 不认 `tail -1`，原样输出全部行，
         # 以前 ev 永远是第一条事件（boot_progress_start）：进度条一直停在 28%（PW6 / PW5 模拟器日志 "boot watch: done ... last=28%"）
         # 进容器读开机进度（logcat）放到后台：模拟器 / 内存紧时它要好几秒，这期间也每 0.25 秒看一眼开机完成标记
@@ -89,11 +89,14 @@ boot_watch() {
         ( $(vd_in) /system/bin/sh -c 'export PATH=/system/bin; logcat -b events -d 2>/dev/null | grep boot_progress; echo "BC=$(getprop sys.boot_completed)"' > $W/bw.out 2>/dev/null ) </dev/null &
         bw_p=$!; k=0
         while [ ! -f $X/ctl/booted ]; do
+            [ -n "$P" ] && kill -0 "$P" 2>/dev/null || break
             [ $k -ge 10 ] && ! kill -0 $bw_p 2>/dev/null && break
+            [ $k -ge 80 ] && break
             usleep 250000; k=$((k + 1))
         done
         if [ -f $X/ctl/booted ]; then done_flag=1; ev=; kill $bw_p 2>/dev/null
         else
+            kill $bw_p 2>/dev/null
             out=$(cat $W/bw.out 2>/dev/null)
             done_flag=$(echo "$out" | sed -n 's/^BC=//p' | tail -1)
             ev=$(echo "$out" | grep boot_progress | tail -1 | sed "s/.* I \(boot_progress[a-z_]*\).*/\1/")

@@ -25,8 +25,20 @@ idle_freeze() {
     touch $W/idlefz                         # 先放标记：冻结中途来的触摸也会解冻
     date +%s > $W/idlefz.t
     echo FROZEN > $FZ/freezer.state 2>/dev/null
+    if_i=0
+    while [ -f $W/idlefz ] && [ "$(freezer_state)" != FROZEN ] && [ $if_i -lt 20 ]; do
+        usleep 100000; if_i=$((if_i + 1))
+    done
     if [ ! -f $W/idlefz ]; then             # 冻结的同时手指落下：veradroid-input 已经拿走标记，这次不冻
-        echo THAWED > $FZ/freezer.state 2>/dev/null; return 0
+        echo THAWED > $FZ/freezer.state 2>/dev/null
+        net_resume
+        return 0
+    fi
+    if [ "$(freezer_state)" != FROZEN ]; then
+        rm -f $W/idlefz
+        echo THAWED > $FZ/freezer.state 2>/dev/null
+        net_resume
+        return 1
     fi
     net_pause
     echo $(( $(cat $W/idle.n 2>/dev/null || echo 0) + 1 )) > $W/idle.n
@@ -43,7 +55,7 @@ idle_tick() {
     if [ -f $W/idlefz ]; then
         [ "$(freezer_state)" = FROZEN ] || { rm -f $W/idlefz; return 0; }
         wk=${IDLE_WAKE:-60}; case "$wk" in ''|*[!0-9]*) wk=60 ;; esac
-        if [ "$n" = 0 ] || [ $((now - $(cat $W/idlefz.t 2>/dev/null || echo 0))) -ge "$wk" ]; then
+        if [ "$n" = 0 ] || [ -f $W/fwd.id ] || [ -f $W/adbfwd.id ] || [ $((now - $(cat $W/idlefz.t 2>/dev/null || echo 0))) -ge "$wk" ]; then
             idle_unfreeze; echo $now > $W/idle.woke
         fi
         return 0
@@ -57,6 +69,8 @@ idle_tick() {
     [ -f $W/booted ] || return 0
     fz_signal && return 0
     [ "$(freezer_state)" = THAWED ] || return 0
+    [ -f $W/fwd.id ] && return 0          # 无线传书开启期间禁止空闲冻结（避免冻住 8080 端口与 slirp4netns 导致网页打不开）
+    [ -f $W/adbfwd.id ] && return 0       # 无线 ADB 开启期间同理不冻结
     [ "${VD_AUDIO:-0}" = 0 ] || return 0
     pidof vdbtkeys >/dev/null 2>&1 && return 0
     fg=$(cat $X/fg 2>/dev/null)

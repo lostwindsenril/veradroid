@@ -4,11 +4,7 @@
   "name": "VeraDroid KT5 (experimental)",
   "author": "VeraDroid",
   "description": "QEMU-booted 32-bit profile; real hardware, e-ink and touch unverified.",
-  "version": [
-    0,
-    2,
-    3
-  ],
+  "version": "0.2.4",
   "dependencies": [],
   "supported_platforms": [
     "kindlehf",

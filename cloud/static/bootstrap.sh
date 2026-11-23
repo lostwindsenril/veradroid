@@ -290,7 +290,7 @@ vd_kill_users() {
     done
 }
 vd_unlock() { [ "$(cat "$INSTALL_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0; rm -f "$INSTALL_LOCK/pid" "$INSTALL_LOCK/boot" "$INSTALL_LOCK/phase"; rmdir "$INSTALL_LOCK" 2>/dev/null || true; }
-vd_cleanup() { _vrc=$?; type ui_on_exit >/dev/null 2>&1 && ui_on_exit "$_vrc"; type syncer_off >/dev/null 2>&1 && syncer_off; vd_kill_users "$TMP"; rm -rf "$TMP"; type vd_kindle_back >/dev/null 2>&1 && vd_kindle_back; type vd_awake_restore >/dev/null 2>&1 && vd_awake_restore; type vd_ssh_back >/dev/null 2>&1 && vd_ssh_back; vd_unlock; }
+vd_cleanup() { _vrc=$?; set +eu; type ui_on_exit >/dev/null 2>&1 && ui_on_exit "$_vrc"; type syncer_off >/dev/null 2>&1 && syncer_off; vd_kill_users "$TMP"; rm -rf "$TMP"; type vd_kindle_back >/dev/null 2>&1 && vd_kindle_back; type vd_awake_restore >/dev/null 2>&1 && vd_awake_restore; type vd_ssh_back >/dev/null 2>&1 && vd_ssh_back; vd_unlock; }
 if ! mkdir "$INSTALL_LOCK" 2>/dev/null; then
     lp=$(cat "$INSTALL_LOCK/pid" 2>/dev/null || true); lb=$(cat "$INSTALL_LOCK/boot" 2>/dev/null || true)
     # 锁在 /mnt/base-us 上，断电后还在：只认本次开机（boot_id 相同）里还活着的持有者
@@ -945,7 +945,7 @@ vd_cands() { # 主站地址 → 候选地址（每行一个：镜像按顺序在
 vd_pick() {
     p_o=$1; p_best=; p_bs=-1; p_seg=1; p_why=
     for p_u in $(vd_cands "$p_o"); do
-        p_w=$(curl_do -s -o /dev/null -r 0-262143 --connect-timeout 8 --max-time 12 -w '%{http_code} %{size_download} %{time_total}' "$p_u" 2>/dev/null) || p_w="000 0 0"
+        p_w=$(curl_do -sL -o /dev/null -r 0-262143 --connect-timeout 8 --max-time 12 -w '%{http_code} %{size_download} %{time_total}' "$p_u" 2>/dev/null) || p_w="000 0 0"
         set -- $p_w
         # 206 = 支持 Range；镜像必须支持（不然多半是错误页 / 跳转页），主站 200 也行（不分段）
         case "$1" in 206) ;; 200) [ "$p_u" = "$p_o" ] || continue ;; *) vlog "probe: $p_u -> HTTP $1"; continue ;; esac
@@ -998,7 +998,7 @@ vd_fetch() {
         [ $((f_a + f_h)) -le $((f_b + 1)) ] || { rm -f "$f_d/$f_i"; f_h=0; }   # 比这一段还长：坏了，重下这段
         if [ $((f_a + f_h)) -le $f_b ]; then
             # 输出用 >> 接在已下好的后面；--stderr 带上目录名，安装器清理残留进程时能按目录找到它
-            curl_do -fsS --connect-timeout 20 --max-time 1800 --speed-limit 1024 --speed-time 30 --stderr "$f_d/err.$f_i" \
+            curl_do -fsSL --connect-timeout 20 --max-time 1800 --speed-limit 1024 --speed-time 30 --stderr "$f_d/err.$f_i" \
                 -r $((f_a + f_h))-$f_b "$f_src" >> "$f_d/$f_i" &
             f_pids="$f_pids $!"
         fi
@@ -1097,7 +1097,8 @@ vd_download() {
         DL_RC=$(cat "$du_o.rc" 2>/dev/null || echo 1); rm -f "$du_o.rc"; [ -n "$DL_RC" ] || DL_RC=1
         du_sz=$(vd_have "$du_o")
         [ $DL_RC = 0 ] && return 0
-        [ $du_t -gt 0 ] && [ $du_sz -ge $du_t ] && return 0
+        du_osz=$(fsize "$du_o"); du_osz=${du_osz:-0}
+        [ $du_t -gt 0 ] && [ -f "$du_o" ] && [ "$du_osz" -ge "$du_t" ] 2>/dev/null && return 0
         # 服务器不支持断点续传（33 / 36）：只能从头来
         case "$DL_RC" in 33|36) rm -rf "$du_o" "$du_o.seg"; du_sz=0 ;; esac
         [ $((du_sz - du_a)) -gt 524288 ] && du_try=0
@@ -2340,10 +2341,10 @@ else
     # rootfs，不能用 PW6（5.15）的包；3.0 / 4.1 内核用 legacy 包（32 位系统 + binder 模块）。
     vlog "device class: ${DEV_CLASS:-unknown (family image)}"
     json=$(fetch_meta --connect-timeout 20 --max-time 30) || DIE_CODE=13 die "无法连接更新服务器（查询版本失败）"
-    url=$(printf '%s' "$json" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
-    sha=$(printf '%s' "$json" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')
-    ver=$(printf '%s' "$json" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-    size=$(printf '%s' "$json" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')
+    url=$(printf '%s' "$json" | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    sha=$(printf '%s' "$json" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p')
+    ver=$(printf '%s' "$json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+    size=$(printf '%s' "$json" | sed -n 's/.*"size": *\([0-9]*\).*/\1/p')
     [ -n "$url" ] && [ -n "$sha" ] || DIE_CODE=13 die "服务器没有可用的安装包"
     vd_mirrors_from "$json"
     # 增量更新（vd_parts_prepare）：成功就跳过下面的整包下载 / 校验 / 解压；不成功什么都不影响，照常下整包

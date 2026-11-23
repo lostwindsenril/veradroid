@@ -23,7 +23,7 @@ if [ "$1" != poke ]; then
 fi
 [ -f $SYS/settings.conf ] && . $SYS/settings.conf
 # 给宿主的命令（FIFO，宿主没在听也不会卡住这个脚本）
-send() { kill -0 "$(cat $W/cmd.pid 2>/dev/null)" 2>/dev/null || return 0; ( echo "$1" > $X/ctl/cmd ) & }   # 没人监听就不发，否则每个手势留下一个永远阻塞的进程
+send() { _p=$(cat $W/cmd.pid 2>/dev/null); [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || return 0; ( echo "$1" > $X/ctl/cmd ) & }   # 没人监听就不发，否则每个手势留下一个永远阻塞的进程
 # ---- 手势提示（docs/gesture-hint.md）：宿主自己让显示桥画一个“方块”小牌子（图标 + 粗体中文 + 英文小字），Android 卡住也看得到 ----
 # GESTURE_HINT=all（默认：每个手势都提示）| stuck（只在 Android 没有响应时提示）| off
 # POS = 牌子贴着哪条边 / 哪个角（t b l r tl tr bl br，逻辑画面的方向，旋转由显示桥处理），由下面的分派设置
@@ -31,7 +31,7 @@ POS=t
 # 写显示桥的 FIFO：它恰好在检查之后退出的话，打开 FIFO 会一直等读者。放到后台、3 秒后还没写完就放弃
 fifo_put() { ( echo "$1" > $X/epd.fifo ) & fp=$!; ( sleep 3; kill $fp 2>/dev/null ) </dev/null >/dev/null 2>&1 & }
 badge() {   # badge <毫秒> <位置> <图标> <英文小字>|<中文>[|<第二行>]
-    [ -p $X/epd.fifo ] && kill -0 "$(cat $W/epd.pid 2>/dev/null)" 2>/dev/null || return 0
+    _p=$(cat $W/epd.pid 2>/dev/null); [ -p $X/epd.fifo ] && [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || return 0
     fifo_put "BADGE $1 $2 $3 $4"
 }
 hint() { [ "${GESTURE_HINT:-all}" = all ] && badge 800 "$POS" "$1" "$2"; return 0; }   # hint <图标> <文字>
@@ -59,7 +59,7 @@ exit_send() {
     send exit
     ( i=0
       while [ $i -lt 16 ]; do usleep 500000; [ -e $W/exit.ack ] || [ -f $W/frozen ] && exit 0; i=$((i + 1)); done
-      kill -0 "$(cat $W/pid 2>/dev/null)" 2>/dev/null || exit 0
+      _p=$(cat $W/pid 2>/dev/null); [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || exit 0
       echo "[$(date +%T)] exit not taken by the command listener in 8 s: veradroid.sh --exit" >> $AL
       cd / && exec setsid sh $VD/boot/veradroid.sh --exit ) </dev/null >/dev/null 2>&1 &
 }
@@ -76,7 +76,7 @@ run_action() {
             # 临时文件名以点开头：HostService 只认 act.*，不会把临时文件当手势吃掉；带 $$：连着两次手势不抢同一个临时文件
             : > $X/ctl/.act.$1.$$ && mv -f $X/ctl/.act.$1.$$ $X/ctl/act.$1; watch_ctl act.$1 ;;
         kindle|return) hint kindle "KINDLE|回 Kindle"; exit_send ;;
-        clear|refresh) hint clear "REFRESH|清残影"; [ -p $X/epd.fifo ] && kill -0 "$(cat $W/epd.pid 2>/dev/null)" 2>/dev/null && fifo_put FULL ;;
+        clear|refresh) hint clear "REFRESH|清残影"; _p=$(cat $W/epd.pid 2>/dev/null); [ -p $X/epd.fifo ] && [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null && fifo_put FULL ;;
         invert) hint invert "INVERT|反色"; send invert ;;
         stop) hint power "STOP|关闭 Android"; send stop ;;
         restart) hint restart "RESTART|重启 Android"; send restart ;;

@@ -4,11 +4,7 @@
   "name": "VeraDroid KT6 (experimental)",
   "author": "VeraDroid",
   "description": "32-bit profile; QEMU still under test; real hardware unverified.",
-  "version": [
-    0,
-    2,
-    3
-  ],
+  "version": "0.2.4",
   "dependencies": [],
   "supported_platforms": [
     "kindlehf",

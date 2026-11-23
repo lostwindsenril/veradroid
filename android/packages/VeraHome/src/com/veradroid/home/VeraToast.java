@@ -48,7 +48,10 @@ final class VeraToast {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             w.setWindowAnimations(0);
             w.setLayout(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.setGravity(Gravity.BOTTOM);
+            w.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.y = Ui.dp(a, 82);   // 悬浮在底部导航栏和翻页条上方，不遮挡按键
+            w.setAttributes(lp);
             w.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
             // 不压暗背景：墨水屏上压暗 = 整屏变灰再变回来，两次全屏重绘
             w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);

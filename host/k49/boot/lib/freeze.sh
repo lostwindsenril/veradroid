@@ -38,7 +38,8 @@ net_resume() { sp=$(cat $W/slirp.pid 2>/dev/null); [ -n "$sp" ] && kill -CONT "$
 # 触摸前端（veradroid-input）：Android 里所有按下的触点都抬起。冻结前 / 解冻前各发一次：冻结期间或之前
 # 被手势吞掉的触摸不会在解冻后变成永远按着的触点。写 inject FIFO 用 1<>：没人读也不会阻塞；veradroid-input 没在跑就不写。
 vinput_reset() {
-    [ -p $W/inject ] && kill -0 "$(cat $W/input.pid 2>/dev/null)" 2>/dev/null || return 0
+    _ip=$(cat $W/input.pid 2>/dev/null)
+    [ -p $W/inject ] && [ -n "$_ip" ] && kill -0 "$_ip" 2>/dev/null || return 0
     echo "reset ${1:-host}" 1<>$W/inject 2>/dev/null
     return 0
 }
@@ -98,13 +99,12 @@ wd_hold() {
     case "$0" in *stop.sh) return 0 ;; esac
     [ -d $FZ/wd ] && return 0
     case "$(cat $FZ/freezer.state 2>/dev/null)" in FROZEN|FREEZING) ;; *) return 0 ;; esac
-    ss=; for p in $(cat $FZ/cgroup.procs 2>/dev/null); do
-        [ "$(cat /proc/$p/comm 2>/dev/null)" = system_server ] && { ss=$p; break; }
-    done
+    # 一次 grep 找出来（以前每个进程、system_server 的每个线程各起一个 cat：100 多个线程，模拟器上要 1.5 秒，都算在解冻里）
+    ss=$(sed 's#^#/proc/#; s#$#/comm#' $FZ/cgroup.procs 2>/dev/null | xargs grep -lx system_server 2>/dev/null | head -n 1)
+    ss=${ss#/proc/}; ss=${ss%/comm}
     [ -n "$ss" ] || return 0
-    wt=; for d in /proc/$ss/task/*; do
-        [ "$(cat $d/comm 2>/dev/null)" = watchdog ] && { wt=${d##*/}; break; }
-    done
+    wt=$(grep -lx watchdog /proc/$ss/task/*/comm 2>/dev/null | head -n 1)
+    wt=${wt%/comm}; wt=${wt##*/}
     [ -n "$wt" ] || return 0
     mkdir $FZ/wd 2>/dev/null || return 0
     if echo FROZEN > $FZ/wd/freezer.state 2>/dev/null && echo $wt > $FZ/wd/tasks 2>/dev/null; then

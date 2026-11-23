@@ -3,7 +3,6 @@ package com.veradroid.home;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.util.HashMap;
@@ -25,22 +24,63 @@ final class HostLink {
     private HostLink() { }
 
     // 一条线程按顺序发：以前每条命令一个线程，连点亮度 / 先 wifi 再 status 时到达顺序不定；
-    // 宿主没在读 FIFO 时每条命令还会留下一个永远卡在 open() 的线程。
+    // 宿主没在读 FIFO 时用 O_NONBLOCK 轮询最多 CMD_TIMEOUT_MS 毫秒，避免永久卡死整个 SENDER。
+    private static final long CMD_TIMEOUT_MS = 2000L;
     private static final java.util.concurrent.ExecutorService SENDER = java.util.concurrent.Executors.newSingleThreadExecutor(
         new java.util.concurrent.ThreadFactory() {
             @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "hostlink"); t.setDaemon(true); return t; }
+        });
+    private static final java.util.concurrent.ExecutorService EPD_SENDER = java.util.concurrent.Executors.newSingleThreadExecutor(
+        new java.util.concurrent.ThreadFactory() {
+            @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "hostlink-epd"); t.setDaemon(true); return t; }
         });
 
     static void cmd(final String line) {
         SENDER.execute(new Runnable() {
             @Override public void run() {
-                try {
-                    FileOutputStream o = new FileOutputStream(CTL + "cmd");
-                    o.write((line + "\n").getBytes());
-                    o.close();
-                } catch (Exception ignored) { }
+                writeCmd(line);
             }
         });
+    }
+
+    private static void writeCmd(String line) {
+        byte[] b = (line + "\n").getBytes();
+        long deadline = android.os.SystemClock.uptimeMillis() + CMD_TIMEOUT_MS;
+        while (true) {
+            java.io.FileDescriptor fd = null;
+            try {
+                fd = android.system.Os.open(CTL + "cmd",
+                        android.system.OsConstants.O_WRONLY | android.system.OsConstants.O_NONBLOCK, 0);
+                int off = 0;
+                while (off < b.length) {
+                    try {
+                        int w = android.system.Os.write(fd, b, off, b.length - off);
+                        if (w <= 0) return;
+                        off += w;
+                    } catch (android.system.ErrnoException we) {
+                        if (we.errno != android.system.OsConstants.EAGAIN && we.errno != android.system.OsConstants.EINTR) return;
+                        long left = deadline - android.os.SystemClock.uptimeMillis();
+                        if (left <= 0) return;
+                        try { Thread.sleep(Math.min(50L, left)); } catch (InterruptedException ie) { return; }
+                    }
+                }
+                return;
+            } catch (android.system.ErrnoException e) {
+                if (e.errno != android.system.OsConstants.ENXIO
+                        && e.errno != android.system.OsConstants.EAGAIN
+                        && e.errno != android.system.OsConstants.ENOENT
+                        && e.errno != android.system.OsConstants.EINTR) {
+                    return;
+                }
+            } catch (Throwable ignored) {
+                return;
+            } finally {
+                if (fd != null) try { android.system.Os.close(fd); } catch (Throwable ignored) { }
+            }
+            long left = deadline - android.os.SystemClock.uptimeMillis();
+            if (left <= 0) return;
+            try { Thread.sleep(Math.min(50L, left)); } catch (InterruptedException e) { return; }
+        }
     }
 
     /** Hand new settings to the host and make it apply them now. */
@@ -136,7 +176,7 @@ final class HostLink {
      * shone through ("ghost text under the panel"). Non-blocking: no bridge reading the FIFO = the hint is simply dropped.
      */
     static void epdHint(final int ms, final int pct) {
-        SENDER.execute(new Runnable() {
+        EPD_SENDER.execute(new Runnable() {
             @Override public void run() {
                 java.io.FileDescriptor fd = null;
                 try {

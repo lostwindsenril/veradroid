@@ -319,6 +319,38 @@ PATCHES = [
     ("frameworks/base/services/core/jni/com_android_server_AlarmManagerService.cpp",
      "        event.events = EPOLLIN | EPOLLWAKEUP;\n",
      "        event.events = EPOLLIN;   // VeraDroid: no wakeup source (Android may be frozen when a timer expires)\n"),
+    # 卸载 / 安装应用时若 netd 短暂超时（NativeDaemonTimeoutException -> IllegalStateException），PermissionMonitor 只抓 RemoteException，
+    # 未捕获异常直接击穿主线程拖垮整个 system_server（真实用户诊断 PW5 1.11 实录）。同时兜底 IllegalStateException。
+    ("frameworks/base/services/core/java/com/android/server/connectivity/PermissionMonitor.java",
+     "        } catch (RemoteException e) {\n            loge(\"Exception when updating permissions: \" + e);\n        }",
+     "        } catch (RemoteException | IllegalStateException e) { // VeraDroid: never crash system_server on netd timeout\n            loge(\"Exception when updating permissions: \" + e);\n        }"),
+    # Android 7.1 经典 Toast$TN.handleShow BadTokenException（微信读书等应用在真实用户诊断 中实录，AOSP 8.0+ 已官方修复）。
+    ("frameworks/base/core/java/android/widget/Toast.java",
+     "                mWM.addView(mView, mParams);\n                trySendAccessibilityEvent();",
+     "                try {\n                    mWM.addView(mView, mParams);\n                    trySendAccessibilityEvent();\n                } catch (WindowManager.BadTokenException e) { // VeraDroid: backport Android 8.0+ Toast BadTokenException guard\n                    Log.w(TAG, \"Ignoring BadTokenException in Toast.handleShow\", e);\n                }"),
+    # 墨水屏惯性滚动阻尼（借鉴文石/墨水屏阅读器）：支持通过 persist.vd.fling_friction（<=31字符，Android 7.1 SystemProperties 上限）调节滚动惯性，
+    # 避免松手后列表长时间滑行拖慢刷新并留残影；未设置时保持 AOSP 默认 SCROLL_FRICTION (0.015f)。
+    ("frameworks/base/core/java/android/view/ViewConfiguration.java",
+     "    public static float getScrollFriction() {\n        return SCROLL_FRICTION;\n    }",
+     "    public static float getScrollFriction() {\n"
+     "        String s = android.os.SystemProperties.get(\"persist.vd.fling_friction\", \"\");\n"
+     "        if (!s.isEmpty()) {\n"
+     "            try {\n"
+     "                float f = Float.parseFloat(s);\n"
+     "                if (f >= 0.005f && f <= 0.25f) return f;\n"
+     "            } catch (NumberFormatException ignored) {}\n"
+     "        }\n"
+     "        return SCROLL_FRICTION;\n"
+     "    }"),
+    # 墨水屏列表拉边光晕静音（文石/海信/大我标配）：列表滑到顶/底不再绘制半透明拉扯光晕，消除末尾 3-5 帧多余刷新与灰斑残影。
+    ("frameworks/base/core/java/android/widget/EdgeEffect.java",
+     "    public boolean draw(Canvas canvas) {\n        update();",
+     "    public boolean draw(Canvas canvas) {\n"
+     "        if (android.os.SystemProperties.getBoolean(\"persist.vd.no_edge_glow\", true)) { // VeraDroid e-ink\n"
+     "            mState = STATE_IDLE;\n"
+     "            return false;\n"
+     "        }\n"
+     "        update();"),
 ]
 for patch in PATCHES:
     rel, old, new = patch[:3]

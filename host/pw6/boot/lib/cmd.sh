@@ -96,12 +96,13 @@ diag_upload() {
     [ -n "$d" ] && [ -d "$d" ] || { rm -f "$note"; diag_result ok=0 "error=diagnostics not saved"; return 1; }
     [ -n "$note" ] && { mv -f "$note" "$d/feedback.txt" 2>/dev/null || { cp "$note" "$d/feedback.txt"; rm -f "$note"; }; }
     tgz="${d%/*}/.${d##*/}.tgz"          # 放在诊断目录旁边（不在 $d 里：tar 不该把自己正在写的归档也打进去；也不放 tmpfs，几十 MB）
-    tar -czf "$tgz" -C "$d" . 2>/dev/null || { rm -f "$tgz"; diag_result ok=0 "error=archive failed"; return 1; }
+    tar -czf "$tgz" -C "$d" . 2>/dev/null || { rm -f "$tgz"; diag_result ok=0 "error=archive failed (disk full?)"; return 1; }
+    [ -s "$tgz" ] || { rm -f "$tgz"; diag_result ok=0 "error=empty archive (disk full?)"; return 1; }
     id=$(cat "$SYS/device-id" 2>/dev/null | tr -cd '0-9A-Za-z' | cut -c1-40)
     [ -n "$id" ] || id=unknown
     hwmodel=$(cat "$SYS/model" 2>/dev/null | tr -cd '0-9A-Za-z_.-' | cut -c1-32)
     ver=$(cat "$SYS/version" 2>/dev/null | tr -cd '0-9A-Za-z_.-' | cut -c1-32)
-    r=$(curl -sS --max-time 120 -w '\nhttp=%{http_code}' -F "device_id=$id" -F "model=$hwmodel" -F "version=$ver" -F "file=@$tgz" "$DIAG_URL" 2>&1)
+    r=$(curl -sS --max-time 120 -H "Expect:" -w '\nhttp=%{http_code}' -F "device_id=$id" -F "model=$hwmodel" -F "version=$ver" -F "file=@$tgz" "$DIAG_URL" 2>&1)
     rm -f "$tgz"
     echo "$r" > "$d/upload-result.txt"
     file=$(printf '%s' "$r" | sed -n 's/.*"file" *: *"\([A-Za-z0-9._-]\{1,80\}\)".*/\1/p' | head -1)
@@ -322,11 +323,11 @@ cmd_listen() {
         usbnoask)  type usb_noask >/dev/null 2>&1 && usb_noask ;;     # 插线提示里点了“不再询问”
         stop)    do_stop ;;
         restart) do_restart ;;
-        diag)    ( diag_save; touch $X/ctl/diag.done ) & ;;
-        diag-upload) ( diag_upload ) & ;;        # 保存诊断并把归档上传到服务器 data/diagnostics
-        feedback)    ( diag_upload note ) & ;;   # 同上，另把用户在“问题反馈”里写的话（ctl/feedback.txt）放进归档
+        diag)    ( diag_save; touch $X/ctl/diag.done ) 3>&- & ;;
+        diag-upload) ( diag_upload ) 3>&- & ;;        # 保存诊断并把归档上传到服务器 data/diagnostics
+        feedback)    ( diag_upload note ) 3>&- & ;;   # 同上，另把用户在“问题反馈”里写的话（ctl/feedback.txt）放进归档
         clear)   epd_send FULL ;;
-        jankdump) type jankrec_dump >/dev/null 2>&1 && ( jankrec_dump ) </dev/null >>$LOG 2>&1 & ;;   # 卡顿记录导出（lib/jankrec.sh）
+        jankdump) type jankrec_dump >/dev/null 2>&1 && ( jankrec_dump ) </dev/null 3>&- >>$LOG 2>&1 & ;;   # 卡顿记录导出（lib/jankrec.sh）
         screenshot)
             mkdir -p $SYS/data/media/0/Screenshots
             vd_timeout 30 $(vd_in) /system/bin/screencap -p /data/media/0/Screenshots/screen-$(date +%Y%m%d-%H%M%S).png >/dev/null 2>&1 && t "screenshot saved" ;;
@@ -377,11 +378,11 @@ cmd_listen() {
         fwd)     numeric "$a" && fwd_on "$a" ;;
         fwdoff)  fwd_off ;;
         fullupdate) # 整包更新：后台脱离 cmd 进程，stop.sh 杀掉 cmd 也能继续下载/替换；安装器和它的输出放在 /tmp（以前在系统盘里：sh 一直开着它，安装器自己调的 stop.sh 就卸不掉系统盘）；实验机型沿用安装时的 model
-            ( setsid sh -c 'm=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null); case "$m" in ""|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac; B=/tmp/vd-fullupdate-bootstrap.sh; cd /; U=/dev/shm/veradroid/kfb/ctl/update.status; printf "state=checking\nstep=net\nlabel=正在连接更新服务器\nmode=manual\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; if curl -fsSL --retry 3 --connect-timeout 20 https://veradroid.wenjin.jp/bootstrap.sh -o "$B"; then sh "$B"; else printf "state=error\ncode=13\nlabel=连不上 VeraDroid 服务器（下载安装器失败）\nline2=可能被墙或服务器在维护，不是机器的问题。可以在 存储与连接 → 网络诊断 里看看是哪一步不通。\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; fi; rm -f "$B"; i=0; while [ $i -lt 3 ]; do sleep 2; P=$(cat /dev/shm/veradroid/pid 2>/dev/null); if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then break; fi; sh /mnt/base-us/veradroid/boot/veradroid.sh home; i=$((i+1)); done' > /tmp/veradroid-fullupdate.log 2>&1; echo $? > /tmp/veradroid-fullupdate.rc ) </dev/null >/dev/null 2>&1 & ;;
+            ( setsid sh -c 'm=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null); case "$m" in ""|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac; B=/tmp/vd-fullupdate-bootstrap.sh; cd /; U=/dev/shm/veradroid/kfb/ctl/update.status; printf "state=checking\nstep=net\nlabel=正在连接更新服务器\nmode=manual\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; if curl -fsSL --retry 3 --connect-timeout 20 https://veradroid.wenjin.jp/bootstrap.sh -o "$B"; then sh "$B"; else printf "state=error\ncode=13\nlabel=连不上 VeraDroid 服务器（下载安装器失败）\nline2=可能被墙或服务器在维护，不是机器的问题。可以在 存储与连接 → 网络诊断 里看看是哪一步不通。\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; fi; rm -f "$B"; i=0; while [ $i -lt 3 ]; do sleep 2; P=$(cat /dev/shm/veradroid/pid 2>/dev/null); if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then break; fi; sh /mnt/base-us/veradroid/boot/veradroid.sh home; i=$((i+1)); done' > /tmp/veradroid-fullupdate.log 2>&1; echo $? > /tmp/veradroid-fullupdate.rc ) </dev/null >/dev/null 2>&1 3>&- & ;;
         uninstall) # 卸载 VeraDroid：交给 uninstall.sh（先拷到 tmpfs 再跑，因为它会删掉 $VD）。
             # 这里以前内联着旧流程：先 stop.sh（卸载 loop 系统盘）再 mv data/media，PW5 / KT5 / KT6 上 Android 里的书会被一起删掉。
             if [ -f "$VD/boot/uninstall.sh" ]; then
-                cp "$VD/boot/uninstall.sh" /dev/shm/vd-uninstall.sh && ( cd / && setsid sh /dev/shm/vd-uninstall.sh ) </dev/null >/dev/null 2>&1 &
+                cp "$VD/boot/uninstall.sh" /dev/shm/vd-uninstall.sh && ( cd / && setsid sh /dev/shm/vd-uninstall.sh ) </dev/null >/dev/null 2>&1 3>&- &
             else
                 t "uninstall: $VD/boot/uninstall.sh missing, nothing done"
             fi ;;
@@ -398,7 +399,7 @@ cmd_listen() {
                 ( type compile_hold >/dev/null 2>&1 && compile_hold
                   r=$(adb_sh "cmd package uninstall --user 0 $a" 2>&1 | tr '\n' ' ')
                   type compile_release >/dev/null 2>&1 && compile_release
-                  echo "$r" > $X/ctl/uninst.$a.tmp; mv -f $X/ctl/uninst.$a.tmp $X/ctl/uninst.$a ) & ;;
+                  echo "$r" > $X/ctl/uninst.$a.tmp; mv -f $X/ctl/uninst.$a.tmp $X/ctl/uninst.$a ) 3>&- & ;;
             esac ;;
         install) # 传书网页 / 商店 / OTA 的 apk：root 身份 pm install；接受 .upload 或 /data/local/tmp 绝对路径
             case "$a" in
@@ -442,32 +443,32 @@ cmd_listen() {
                   # 装完 / 更新完：按清单停用这个应用的后台组件（appslim.sh；新版本可能换了组件名）
                   case "$r" in *Success*) type appslim_all >/dev/null 2>&1 && appslim_all install ;; esac
                   case "$r" in *Success*) type compile_watch >/dev/null 2>&1 && compile_watch
-                      type shizuku_start >/dev/null 2>&1 && shizuku_start ;; esac ) &
+                      type shizuku_start >/dev/null 2>&1 && shizuku_start ;; esac ) 3>&- &
             fi ;;
         netdiag) # 桌面“网络诊断”：Wi-Fi / 域名解析 / 服务器 / 速度，结果写 ctl/netdiag.status（progress.sh 的 vp_netdiag）
-            type vp_netdiag >/dev/null 2>&1 && ( vp_netdiag $X/ctl/netdiag.status ) </dev/null >/dev/null 2>&1 & ;;
+            type vp_netdiag >/dev/null 2>&1 && ( vp_netdiag $X/ctl/netdiag.status ) </dev/null >/dev/null 2>&1 3>&- & ;;
         saver)   type saver_cmd >/dev/null 2>&1 && saver_cmd "$a" ;;   # saver list | done（saver.sh）：屏保挑选页要看 veradroid/screensaver 里的图
-        appslim) type appslim_cmd >/dev/null 2>&1 && ( appslim_cmd "$a" ) & ;;   # appslim <包> | all | restore（appslim.sh，后台瘦身）
+        appslim) type appslim_cmd >/dev/null 2>&1 && ( appslim_cmd "$a" ) 3>&- & ;;   # appslim <包> | all | restore（appslim.sh，后台瘦身）
         compile) type compile_cmd >/dev/null 2>&1 && compile_cmd "$a" ;;   # compile all | compile <包>（compile.sh）；进度 ctl/compile.status
         webview) case "$a" in get|cancel) type webview_cmd >/dev/null 2>&1 && webview_cmd "$a" ;; esac ;;   # 新网页内核下载 / 取消（container.sh webview_dl，进度 ctl/webview.status）
         localupdate) # 离线更新文件夹（localupdate.sh）：check = 只看文件名，结果写 ctl/update.local；install = 校验并安装
             case "$a" in
-                check) ( VD=$VD sh $VD/boot/lib/localupdate.sh check > $X/ctl/update.local.tmp 2>/dev/null; mv -f $X/ctl/update.local.tmp $X/ctl/update.local ) & ;;
-                install) cp $VD/boot/lib/localupdate.sh $W/localupdate.sh && ( cd / && setsid sh $W/localupdate.sh install --start ) </dev/null >/dev/null 2>&1 & ;;
+                check) ( VD=$VD sh $VD/boot/lib/localupdate.sh check > $X/ctl/update.local.tmp 2>/dev/null; mv -f $X/ctl/update.local.tmp $X/ctl/update.local ) 3>&- & ;;
+                install) cp $VD/boot/lib/localupdate.sh $W/localupdate.sh && ( cd / && setsid sh $W/localupdate.sh install --start ) </dev/null >/dev/null 2>&1 3>&- & ;;
             esac ;;
         storage) # storage info | resize <MB> | auto on|off（storage.sh）。结果：ctl/storage、ctl/storage.result
             type st_cmd >/dev/null 2>&1 && case "$a" in
-                info) ( st_cmd info ) & ;;
-                "resize "*) sa=${a#resize }; st_num "$sa" && ( st_cmd resize "$sa" ) & ;;
+                info) ( st_cmd info ) 3>&- & ;;
+                "resize "*) sa=${a#resize }; st_num "$sa" && ( st_cmd resize "$sa" ) 3>&- & ;;
                 "auto on"|"auto off") st_cmd auto "${a#auto }" ;;
             esac ;;
         bt)      type bt_cmd >/dev/null 2>&1 && bt_cmd "$a" ;;   # bt map/swap/bridge、scan/list/bond/connect/disconnect/unbond/enable/disable（bt.sh，参数在那里校验）
-        optimize) ( opt_run ) & ;;   # 面板的“优化机器状态”（opt_run）
+        optimize) ( opt_run ) 3>&- & ;;   # 面板的“优化机器状态”（opt_run）
         poke)    lipc-set-prop -i com.lab126.powerd touchScreenSaverTimeout 1 2>/dev/null ;;
         wifi)    case "$a" in 0|1) wifi_set "$a"; status_write ;; esac ;;   # 只开关 Wi-Fi，不动飞行模式和蓝牙（common.sh wifi_set）
-        wifilist)    ( wifi_list ) & ;;
-        wificonnect) ( wifi_connect "$a" ) & ;;   # 参数在 wifi_connect 里校验（十六进制、没有控制字符）；新网络的密码另走管理请求 wifipsk
-        wifiscan)    ( wifi_scan ) & ;;
+        wifilist)    ( wifi_list ) 3>&- & ;;
+        wificonnect) ( wifi_connect "$a" ) 3>&- & ;;   # 参数在 wifi_connect 里校验（十六进制、没有控制字符）；新网络的密码另走管理请求 wifipsk
+        wifiscan)    ( wifi_scan ) 3>&- & ;;
         dns)     case "$a" in
                      auto|aliyun|tencent|google)
                          grep -v "^DNS_MODE=" $SYS/settings.conf > $SYS/settings.conf.tmp 2>/dev/null

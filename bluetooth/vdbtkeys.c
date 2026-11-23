@@ -34,6 +34,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,7 @@ struct dev {
     char path[64], name[128], clone_node[160];
     int grabbed;
     int pending;       /* keyboard clone not yet visible in the container (no container pid yet) */
+    uint8_t key_down[KEY_MAX / 8 + 1];
 };
 
 static FILE *logf_;
@@ -130,6 +132,31 @@ static void emit(int fd, int type, int code, int value) {
     struct input_event e; memset(&e, 0, sizeof e);
     e.type = type; e.code = code; e.value = value;
     if (write(fd, &e, sizeof e) < 0) lg("emit failed: %s", strerror(errno));
+}
+
+static void key_track(struct dev *dv, int code, int value) {
+    if (code < 0 || code > KEY_MAX) return;
+    if (value) dv->key_down[code >> 3] |= (uint8_t)(1u << (code & 7));
+    else dv->key_down[code >> 3] &= (uint8_t)~(1u << (code & 7));
+}
+
+static void release_held_keys(struct dev *dv) {
+    int dst = dv->kbd ? dv->ufd : btkeys;
+    int any = 0;
+    for (size_t b = 0; b < sizeof dv->key_down; b++) {
+        uint8_t mask = dv->key_down[b];
+        if (!mask) continue;
+        dv->key_down[b] = 0;
+        for (int bit = 0; bit < 8; bit++) {
+            if (!(mask & (1u << bit))) continue;
+            int k = (int)(b * 8) + bit;
+            if (k <= KEY_MAX && dst >= 0) {
+                emit(dst, EV_KEY, k, 0);
+                any = 1;
+            }
+        }
+    }
+    if (any && dst >= 0) emit(dst, EV_SYN, SYN_REPORT, 0);
 }
 
 static int dropping(void) {
@@ -234,7 +261,6 @@ static void clone_publish(struct dev *dv) {
     FILE *f = fopen(p, "r"); if (f) { if (!fgets(num, sizeof num, f)) num[0] = 0; fclose(f); }
     unsigned ma, mi;
     if (sscanf(num, "%u:%u", &ma, &mi) != 2) { lg("%s: no device number", p); dv->pending = 0; return; }
-    snprintf(p, sizeof p, "/dev/input/%s", ev); chmod(p, 0666);
     int pid = container_pid();
     char root[96]; struct stat st_host, st_ct;
     snprintf(root, sizeof root, "/proc/%d/root/system/build.prop", pid);
@@ -246,6 +272,7 @@ static void clone_publish(struct dev *dv) {
     }
     snprintf(root, sizeof root, "/proc/%d/root/dev/input", pid);
     if (stat(root, &st_ct) < 0) { dv->pending = 1; return; }
+    snprintf(p, sizeof p, "/dev/input/%s", ev); chmod(p, 0666);
     if (stat("/dev/input", &st_host) == 0 && st_host.st_dev == st_ct.st_dev) {
         /* container shares the host's /dev (chroot mode on old kernels): the node is already visible there */
         dv->pending = 0; lg("keyboard %s -> %s (shared /dev)", dv->name, ev); return;
@@ -288,6 +315,7 @@ static int make_clone(struct dev *dv) {
 
 static void dev_close(struct dev *dv, const char *why) {
     lg("drop %s (%s): %s", dv->path, dv->name, why);
+    release_held_keys(dv);
     if (dv->clone_node[0]) { unlink(dv->clone_node); dv->clone_node[0] = 0; }
     if (dv->ufd >= 0) { ioctl(dv->ufd, UI_DEV_DESTROY); close(dv->ufd); }
     close(dv->fd);
@@ -355,10 +383,16 @@ static void handle(struct dev *dv) {
         ssize_t r = read(dv->fd, e, sizeof e);
         if (r < 0) { if (errno == EAGAIN) return; dev_close(dv, strerror(errno)); return; }
         if (r == 0) { dev_close(dv, "eof"); return; }
-        if (released || dropping()) continue;     /* Kindle UI in front, or Android frozen: never queue */
-        int n = r / sizeof e[0];
+        if (released || dropping()) { release_held_keys(dv); continue; }     /* Kindle UI in front, or Android frozen: never queue */
+        int n = (int)(r / (ssize_t)sizeof e[0]);
         for (int i = 0; i < n; i++) {
-            if (dv->kbd) { if (dv->ufd >= 0 && write(dv->ufd, &e[i], sizeof e[i]) < 0) lg("kbd write: %s", strerror(errno)); continue; }
+            if (dv->kbd) {
+                if (dv->ufd >= 0) {
+                    if (write(dv->ufd, &e[i], sizeof e[i]) < 0) lg("kbd write: %s", strerror(errno));
+                    else if (e[i].type == EV_KEY) key_track(dv, e[i].code, e[i].value);
+                }
+                continue;
+            }
             if (e[i].type != EV_KEY) continue;
             int c = e[i].code, v = e[i].value;
             if (c == KEY_BRIGHTNESSUP || c == KEY_BRIGHTNESSDOWN) { if (v) run_action("light", c == KEY_BRIGHTNESSUP ? "+" : "-"); continue; }
@@ -366,6 +400,7 @@ static void handle(struct dev *dv) {
             int m = remap(c);
             if (v == 1) { int d = direction(c); if (d) epd_dir(swap_dir ? -d : d); }   /* before Android draws the new page */
             emit(btkeys, EV_KEY, m, v); emit(btkeys, EV_SYN, SYN_REPORT, 0);
+            key_track(dv, m, v);
             if (v == 1) lg("key %d -> %d", c, m);
         }
     }
@@ -374,6 +409,7 @@ static void handle(struct dev *dv) {
 static void set_grab(int on) {
     for (int i = 0; i < MAXDEV; i++) {
         if (devs[i].fd < 0) continue;
+        if (!on) release_held_keys(&devs[i]);
         if (ioctl(devs[i].fd, EVIOCGRAB, on ? 1 : 0) == 0) devs[i].grabbed = on;
     }
     released = !on;

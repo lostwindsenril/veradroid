@@ -346,17 +346,25 @@ final class BlocksFiles {
         new VeraDialog.Builder(a).title("把 " + paths.size() + " 个文件移动到").items(names, new VeraDialog.OnPick() { @Override public void onPick(final int w) {
             new VeraDialog.Builder(a).title("确认移动").message(paths.size() + " 个文件移动到“" + r[w][0] + "”。").negative("取消", null)
                 .positive("移动", new Runnable() { @Override public void run() {
-                    int ok = 0;
-                    File dir = new File(r[w][1]);
-                    dir.mkdirs();
-                    for (String p : paths) {
-                        File f = new File(p), to = new File(dir, f.getName());
-                        if (to.exists()) continue;
-                        if (f.renameTo(to) || (copy(f, to) && f.delete())) ok++;
-                    }
-                    VeraToast.show(a, "移动了 " + ok + " / " + paths.size() + " 个");
+                    final List<String> copyPaths = new ArrayList<String>(paths);
+                    final File dir = new File(r[w][1]);
+                    VeraToast.show(a, "正在移动 " + copyPaths.size() + " 个文件…");
                     endSelectQuiet();
-                    changedOnDisk(dir);
+                    new Thread(new Runnable() { @Override public void run() {
+                        int ok = 0;
+                        dir.mkdirs();
+                        for (String p : copyPaths) {
+                            File f = new File(p), to = new File(dir, f.getName());
+                            if (to.exists()) continue;
+                            if (f.renameTo(to) || (copy(f, to) && f.delete())) ok++;
+                        }
+                        final int moved = ok;
+                        a.runOnUiThread(new Runnable() { @Override public void run() {
+                            if (a.isFinishing()) return;
+                            VeraToast.show(a, "移动了 " + moved + " / " + copyPaths.size() + " 个");
+                            changedOnDisk(dir);
+                        } });
+                    } }, "vd-file-move").start();
                 } }).show();
         } }).negative("取消", null).show();
     }
@@ -390,14 +398,20 @@ final class BlocksFiles {
     }
 
     private static boolean copy(File from, File to) {
+        java.io.FileInputStream in = null;
+        java.io.FileOutputStream out = null;
         try {
-            java.io.FileInputStream in = new java.io.FileInputStream(from);
-            java.io.FileOutputStream out = new java.io.FileOutputStream(to);
+            in = new java.io.FileInputStream(from);
+            out = new java.io.FileOutputStream(to);
             byte[] b = new byte[65536]; int n;
             while ((n = in.read(b)) > 0) out.write(b, 0, n);
-            in.close(); out.close();
+            out.flush();
             return to.length() == from.length();
         } catch (Throwable t) { to.delete(); return false; }
+        finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) {}
+            try { if (out != null) out.close(); } catch (Throwable ignored) {}
+        }
     }
 
     private List<Item> items() {

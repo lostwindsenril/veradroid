@@ -3,9 +3,7 @@
 # the three hosts carry the same files, the built-in table is well-formed, and the lookup / save logic behaves.
 cd "$(dirname "$0")/.." || exit 2
 fail() { echo "FAIL: $*"; exit 1; }
-# host/legacy is the legacy line's own release (docs/legacy-line.md): it is checked only once it carries this change.
-HL=; grep -q 'appprof_oec_publish' host/legacy/boot/lib/appprof.sh && HL=legacy
-for h in k49 $HL; do
+for h in k49 legacy; do
     cmp -s host/pw6/boot/lib/appprof.sh host/$h/boot/lib/appprof.sh || fail "host/$h/boot/lib/appprof.sh differs from host/pw6"
     cmp -s host/pw6/boot/appprofiles.conf host/$h/boot/appprofiles.conf || fail "host/$h/boot/appprofiles.conf differs from host/pw6"
 done
@@ -65,7 +63,7 @@ expect "J 0"
 expect "K global"
 # e-ink reader apps that run on the 32-bit container
 expect "L com.douban.book.reader KFB_MODE=1;KFB_FLASH=6;"
-expect "L com.jjwxc.reader KFB_MODE=1;KFB_FLASH=6;"
+expect "L com.jjwxc.reader KFB_SMOOTH=2;KFB_FLASH=6;KFB_SCROLLDU=300;"
 expect "L cn.duku KFB_MODE=1;KFB_FLASH=6;"
 expect "L com.eusoft.eudic KFB_SCROLLDU=300;"
 expect "L com.pldx.engang KFB_SCROLLDU=300;"
@@ -117,8 +115,8 @@ for lv in 1 2; do
         appprof_fg com.duokan.einkreader
         echo "O$(cat $W/density.cur 2>/dev/null || echo default)|$(tr "\n" " " < $X/density.apps)|$(grep "^com.duokan.einkreader " $X/appoec)"')
     case $lv in
-        1) [ "$oout" = "O376|com.duokan.reader com.duokan.einkreader |" ] || fail "ro.vd.oec=1: $oout" ;;
-        2) [ "$oout" = "Odefault||com.duokan.einkreader DENSITY=auto1080" ] || fail "ro.vd.oec=2: $oout" ;;
+        1) [ "$oout" = "O376|com.duokan.reader com.duokan.einkreader |com.duokan.einkreader OEC_TOAST=1" ] || fail "ro.vd.oec=1: $oout" ;;
+        2) [ "$oout" = "Odefault||com.duokan.einkreader DENSITY=auto1080;OEC_TOAST=1" ] || fail "ro.vd.oec=2: $oout" ;;
     esac
 done
 echo "appprof: ok"

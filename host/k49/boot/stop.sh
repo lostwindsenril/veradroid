@@ -74,9 +74,10 @@ for f in guard watchdog sleep lipc usb cmd boot slirp shutw compile; do
     [ "$p" = "$$" ] && continue                 # vdshutwatch exec 成了本脚本：pid 就是自己
     # 先杀子进程（watchdog 的 sleep 20 之类）：父进程死了它们还会继承着打开的脚本文件，让 /mnt/base-us 卸不掉
     # 只限这几个循环：cmd 的子进程里有脱离出去的卸载 / 整包更新，不能杀
-    case "$f" in guard|watchdog|sleep|lipc|usb|boot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
+    case "$f" in guard|watchdog|sleep|lipc|usb|boot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do for cc in $(pgrep -P "$c" 2>/dev/null); do kill $cc 2>/dev/null && ps="$ps $cc"; done; kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
     [ -n "$p" ] && kill $p 2>/dev/null && ps="$ps $p"
 done
+for p in $(pgrep -f "lipc-wait-event .*com\.lab126\.hal usbPlugIn,usbPlugOut" 2>/dev/null); do kill $p 2>/dev/null && ps="$ps $p"; done
 for p in $(pgrep -f "^unshare -m -u -i -n -p -f -- sh .*--in-ns" 2>/dev/null); do
     for c in $(cat /proc/$p/task/$p/children 2>/dev/null) $p; do kill -9 $c 2>/dev/null && ps="$ps $c"; done
 done
@@ -102,6 +103,8 @@ rm -f $W/adbfwd.ipt $W/adbfwd.id $W/adb.until $X/ctl/adb.on $SYS/data/misc/adb/a
 kill $(cat $W/netheal.pid 2>/dev/null) 2>/dev/null
 rm -f $W/netheal.pid $W/net.sig $W/net.last $W/resolv.new
 rm -f $W/fwd.id $W/fwd.ipt $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
+rm -rf $W/appslim.lock $W/idlefz $W/idlefz.t $W/exiting $W/exit.ack $W/alarmfix $W/appprof.pkg $W/bat.start $W/bw.released $W/docs.before $W/docs.missing $W/gestures $W/inject $W/lastinput $W/lasttouch $W/memfg.cur $W/poem $W/shutw.log $W/sleep.cur $W/splash.* $W/tz.android $W/uiderr.lines $W/webview.mode
+[ -n "$SHUT" ] || rm -f $W/stop-shutdown.sh
 
 # chroot 模式（3.0 内核，没有命名空间）：容器进程不会随 init 一起消失，按根目录逐个杀；
 # 挂载做在宿主上，由深到浅卸掉 $R 下面的每一个，再卸 $R 自己
@@ -138,7 +141,7 @@ wifi_ps_restore
 rm -f $W/cmdline $W/power.fifo
 if [ -n "$RS" ]; then rm -f $W/restarting; elif [ -z "$SHUT" ]; then framework_start; fi
 [ -n "$SHUT" ] && vdkaf_stop 2>/dev/null      # Kindle 在关机：顶替框架的 vdkaf（KINDLE_UI=stop）不用再留
-rm -rf $W/kfb
+rm -rf $W/kfb $W/vdkaf.log
 if [ -n "$SHUT" ]; then   # 关机时连自动更新也停掉（它的锁目录和日志在 /mnt/base-us 上）
     ap=$(cat $W/autoupdate.pid 2>/dev/null)
     [ -n "$ap" ] && { for c in $(pgrep -P "$ap" 2>/dev/null); do kill $c 2>/dev/null; done; kill "$ap" 2>/dev/null; }

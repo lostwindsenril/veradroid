@@ -49,10 +49,11 @@ input_touch_start() {
     : > $W/input.err   # 追加方式打开（同 epd.log：watchdog 的 log_cap 会截短它）
     $VD/bin/veradroid-input $REAL $W/input.log $VD/boot/action.sh --w ${viewWidth:-1272} --h ${viewHeight:-1696} --edge 120 --window ${G_WINDOW:-40} --edge-hold 60 --edge-swipe 80 --edge-back ${KFB_EDGE_BACK:-1} --corner-ms $cm --flag $W/nogestures --inject $W/inject --gconf $W/gestures --fg $X/fg ${TAPDEV:+--tapdev $TAPDEV} --rt ${INPUT_RT:-0} $(input_cpufreq_arg) $(type idle_vinput_args >/dev/null 2>&1 && idle_vinput_args) $(rot_args) >>$W/input.err 2>&1 &
     echo $! > $W/input.pid
-    i=0; while [ $i -lt 20 ]; do
+    # 每 50 毫秒看一次（以前 200 毫秒），最多仍是 4 秒
+    i=0; while [ $i -lt 80 ]; do
         vt=$(input_sysname veradroid-touch); vk=$(input_sysname veradroid-keys)
         [ -n "$vt" ] && [ -n "$vk" ] && break
-        usleep 200000; i=$((i + 1))
+        usleep 50000; i=$((i + 1))
     done
     if [ -z "$vt" ]; then
         # 触摸前端没起来（崩了 / 没有 uinput）：把真正的触摸屏直接交给 Android。没有全局手势，但至少能点“返回 Kindle”，

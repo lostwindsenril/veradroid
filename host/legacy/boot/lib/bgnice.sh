@@ -22,11 +22,12 @@ bgnice_tick() {
         [ -d /proc/$bp ] || { rm -f "$f"; continue; }
         badj=$(cat /proc/$bp/oom_score_adj 2>/dev/null)
         if [ "$bn" = 0 ] || [ -z "$badj" ] || [ "$badj" -lt "$ba" ] 2>/dev/null; then
-            while read -r bt bo; do [ "$bo" = - ] && continue; [ -d /proc/$bp/task/$bt ] && renice "$bo" -p "$bt" >/dev/null 2>&1; done < "$f"
+            while read -r bt bo; do [ "$bo" = - ] && continue; [ -d /proc/$bp/task/$bt ] && renice "$bo" -p "$bt" >/dev/null 2>&1; done < "$f" 2>/dev/null
             # 降着的时候新开的线程继承了 BG_NICE，没有记录：放回 0。降的时候就在、本来就 >= BG_NICE 的线程（应用自己设的后台线程，
             # 记成 “tid -”）不动：以前它们也没有记录，回到前台时被一起抬到 0，后台线程和界面线程抢 CPU（社区报告）
             for tt in /proc/$bp/task/[0-9]*; do
-                bt=${tt##*/}; grep -q "^$bt " "$f" && continue
+                [ -f "$f" ] || break
+                bt=${tt##*/}; grep -q "^$bt " "$f" 2>/dev/null && continue
                 { read -r ts < $tt/stat; } 2>/dev/null || continue
                 [ "$(echo "${ts##*) }" | awk '{print $17}')" = "${BG_NICE_SET:-10}" ] && renice 0 -p "$bt" >/dev/null 2>&1
             done

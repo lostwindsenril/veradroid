@@ -290,7 +290,7 @@ container_start() {
     sysfont_prepare       # 系统字体：生成 $W/sysfont（run_in_ns 绑进去）
     fstrim_defuse
     docs_snapshot         # 开机完成后 after_boot 拿它核对 Kindle 书库（docs_verify）
-    wc -l < $SYS/data/system/uiderrors.txt 2>/dev/null | tr -d ' ' > $W/uiderr.lines
+    if [ -f $SYS/data/system/uiderrors.txt ]; then wc -l < $SYS/data/system/uiderrors.txt | tr -d ' ' > $W/uiderr.lines; else echo 0 > $W/uiderr.lines; fi
     if hostns; then
         # 先进 freezer 组再 fork（port of c1f3b033）：以前只 freezer_setup，内核有 cgroup freezer 时“冻结”的是一个空组、Android 在屏保里
         # 照跑。现在的老机型内核（3.0 没有 cgroup、4.1 没有 freezer）都是信号模式（按 chroot_pids 发 SIGSTOP），freezer_enter 不做事；
@@ -453,6 +453,14 @@ run_in_ns() {
     for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing sys/kernel/debug; do
         [ -d $R/$d ] && mount -t tmpfs -o ro,size=4k tmpfs $R/$d
     done
+    # BatteryStatsService 的 KernelWakelockReader 每隔几分钟读 /proc/wakelocks 或 /d/wakeup_sources（/d -> /sys/kernel/debug）；
+    # 两者都不存在时 system_server 持续触发 Slog.wtf，向 /data/system/dropbox 写入大量 wtf 堆栈文件（用户诊断 实证）。
+    # 在只读空 tmpfs 中放一个 0 字节只读 wakeup_sources 即可彻底静音且保持宿主 debugfs 隔离。
+    if [ ! -e /proc/wakelocks ] && [ -d $R/sys/kernel/debug ]; then
+        mount -o remount,rw $R/sys/kernel/debug 2>/dev/null && \
+            : > $R/sys/kernel/debug/wakeup_sources && chmod 444 $R/sys/kernel/debug/wakeup_sources && \
+            mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+    fi
 
     if [ -n "$DEMO" ]; then
         # 演示根：借宿主的 busybox、库、FBInk 和字体（只读）

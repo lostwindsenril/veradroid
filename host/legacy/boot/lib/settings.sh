@@ -197,16 +197,47 @@ settings_apply() {
     sfile=$W/settings.apply.$$.$(cut -d' ' -f1 /proc/uptime | tr -d .)
     mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
     touch $SYS/settings.conf
-    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP; do
-        v=$(sed -n "s/^$k=\([0-9A-Za-z._,]*\)\$/\1/p" "$sfile" | tail -1)
-        [ -n "$v" ] || continue
-        case "$k=$v" in LOWMEM=auto|LOWMEM=on|LOWMEM=off|KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop|GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; LOWMEM=*|KINDLE_UI=*|GESTURE_HINT=*) continue ;; esac
-        case "$k=$v" in PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;; esac
-        grep -v "^$k=" $SYS/settings.conf > "$sfile.conf" 2>/dev/null
-        # KEY=default：删掉用户的设置，回到默认值（机型默认 / models/<id>.conf / settings_defaults）——桌面“恢复默认设置”用
-        [ "$v" = default ] || echo "$k=$v" >> "$sfile.conf"
-        mv -f "$sfile.conf" $SYS/settings.conf
-    done
+    if [ -s "$sfile" ]; then
+        sa_raw=" $(tr '\n' ' ' < "$sfile") "
+        sa_upd=""
+        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP; do
+            case "$sa_raw" in *" $k="*) ;; *) continue ;; esac
+            v=$(sed -n "s/^$k=//p" "$sfile" | tail -1)
+            [ -n "$v" ] || continue
+            case "$v" in *[!0-9A-Za-z._,]*) continue ;; esac
+            case "$k=$v" in
+                LOWMEM=auto|LOWMEM=on|LOWMEM=off) ;; LOWMEM=*) continue ;;
+                KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop) ;; KINDLE_UI=*) continue ;;
+                GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; GESTURE_HINT=*) continue ;;
+                PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;;
+            esac
+            sa_upd="${sa_upd}${k}=${v}
+"
+        done
+        if [ -n "$sa_upd" ]; then
+            # KEY=default：删掉用户的设置，回到默认值（机型默认 / models/<id>.conf / settings_defaults）——桌面“恢复默认设置”用
+            awk -v upd_str="$sa_upd" '
+                BEGIN {
+                    n = split(upd_str, lines, "\n")
+                    for (i = 1; i <= n; i++) {
+                        eq = index(lines[i], "=")
+                        if (eq > 1) { k = substr(lines[i], 1, eq - 1); upd[k] = substr(lines[i], eq + 1); ord[++m] = k }
+                    }
+                }
+                {
+                    eq = index($0, "=")
+                    if (eq > 1 && (substr($0, 1, eq - 1) in upd)) next
+                    print
+                }
+                END {
+                    for (i = 1; i <= m; i++) {
+                        k = ord[i]
+                        if (upd[k] != "default") print k "=" upd[k]
+                    }
+                }
+            ' "$SYS/settings.conf" > "$sfile.conf" 2>/dev/null && mv -f "$sfile.conf" $SYS/settings.conf
+        fi
+    fi
     # 系统字体：值是路径（有 /、-、空格、中文），不走上面那条只认 [0-9A-Za-z._,] 的规则。只收三个字体目录里的文件（sysfont_host），
     # 不收引号、$、`、\；带单引号写进 settings.conf（root 会 source 它）。default / none = 删掉（原样字体）。重启 Android 生效。
     if grep -q '^SYSTEM_FONT=' "$sfile"; then

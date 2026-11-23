@@ -30,12 +30,12 @@ public class HostSettingsActivity extends Activity {
 
     private final Handler handler = new Handler();
     private Map<String, String> host;
-    private LinearLayout list;
+    private LinearLayout list, customRefreshBox;
     private TextView compileView, smoothNote, webviewView;
     private android.widget.Button webviewBtn;
     private String webviewAct;
     private CtlWatch.Listener compileWatch, webviewWatch;
-    private boolean system;
+    private boolean system, webviewOnly;
     private boolean rotatePending;
     private Runnable pendingRotate = new Runnable() { @Override public void run() { } };
 
@@ -43,14 +43,16 @@ public class HostSettingsActivity extends Activity {
         super.onCreate(b);
         getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.WHITE));
         getWindow().setWindowAnimations(0);
-        system = "system".equals(getIntent().getStringExtra("page"));
+        String pageArg = getIntent().getStringExtra("page");
+        system = "system".equals(pageArg);
+        webviewOnly = "webview".equals(pageArg);
         host = HostLink.kv(HostLink.KFB + "settings");
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(Color.WHITE);
         page.setPadding(dp(16), dp(8), dp(16), dp(8));
         setContentView(page);
-        TextView title = Ui.text(this, system ? "系统与性能" : "显示与刷新", 30, true);
+        TextView title = Ui.text(this, webviewOnly ? "实验性网页内核" : system ? "系统与性能" : "显示与刷新", 30, true);
         title.setPadding(0, dp(8), 0, dp(4));
         page.addView(title);
         final PageScrollView sv = new PageScrollView(this);
@@ -64,13 +66,13 @@ public class HostSettingsActivity extends Activity {
         nav.addView(Ui.button(this, "下一屏", 17, false, new View.OnClickListener() { @Override public void onClick(View v) { sv.page(1); } }), weight());
         page.addView(nav);
         if (Blocks.on(this)) {   // 方块风格：方块页头；“上一屏 / 下一屏 / 返回”换成翻页条（返回在页头右边）
-            Blocks.restyle(this, page, title, null, system ? "System / performance" : "Display / host");
+            Blocks.restyle(this, page, title, null, webviewOnly ? "WebView / Chromium 119" : system ? "System / performance" : "Display / host");
             page.removeView(nav);
             page.removeView(sv);
             sv.removeView(list);
             page.addView(Blocks.paged(this, list), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         }
-        if (system) buildSystem(); else buildDisplay();
+        if (webviewOnly) buildWebviewOnly(); else if (system) buildSystem(); else buildDisplay();
     }
 
     private int dp(int v) { return Ui.dp(this, v); }
@@ -105,13 +107,14 @@ public class HostSettingsActivity extends Activity {
         final TextView val = Ui.text(this, at >= 0 ? labels[at] : cur, 20, false);
         val.setGravity(Gravity.CENTER);
         final boolean blk = Blocks.on(this);
-        if (blk) {   // 方块风格：值是黑底白字的方块，两边方框箭头（和步进器一样）
+        if (blk) {   // 方块风格：值是黑底白字的方块，允许两行显示，避免长文案被截断
             Fonts.apply(val, true);
-            val.setTextSize(17);
+            val.setTextSize(16);
             val.setTextColor(Color.WHITE);
             val.setBackground(Blocks.plainFilled(this));
-            val.setSingleLine(true);
-            val.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            val.setSingleLine(false);
+            val.setMaxLines(2);
+            val.setPadding(dp(6), dp(4), dp(6), dp(4));
         }
         LinearLayout line = new LinearLayout(this);
         line.setGravity(Gravity.CENTER_VERTICAL);
@@ -126,6 +129,7 @@ public class HostSettingsActivity extends Activity {
                     val.setText(labels[n]);
                     host.put(key, values[n]);
                     if (after != null) after.set(values[n]);
+                    UiMode.guide(HostSettingsActivity.this, UiMode.keyEffect(key, values[n], labels[n]));
                     final String line = key + "=" + values[n] + "\n";
                     // 旋转：横屏要重启 Android，连点几下“›”路过的档位不能每个都生效——停手 2.5 秒后才发最后选的那个
                     if (key.equals("KFB_ROTATE")) {
@@ -156,24 +160,34 @@ public class HostSettingsActivity extends Activity {
         stepper("屏幕旋转", "画面顺时针转。倒过来（180°）立即生效；横屏（90° / 270°）要重启 Android（约 20 秒，自动进行）。停手 2.5 秒后才生效。",
             "KFB_ROTATE", new String[] { "竖屏（0°）", "倒过来（180°）", "横屏（90°，会重启）", "横屏（270°，会重启）" },
             new String[] { "0", "180", "90", "270" }, "0", null);
-        section("档位");
-        stepper("显示档位", "一次定好下面的刷新方式：流畅（先快刷、停下再补灰度）、均衡、画质（驱动自动选波形，合并中间帧）。选“自定义”时按下面几项单独设。",
-            "KFB_SMOOTH", new String[] { "自定义", "流畅", "均衡", "画质" }, new String[] { "0", "1", "2", "3" }, "0",
+        section("刷新模式（与单应用优化统一，全部自带去残影）");
+        stepper("全局刷新模式", "高清：最锐利 · 均衡：推荐 · 快速：快刷+停手补刷 · 极速：A2 最跟手+自动全清残影。选“自定义”才展开下方细项。",
+            "KFB_SMOOTH", new String[] { "自定义", "快速（DU）", "均衡（推荐）", "高清（画质）", "极速（A2）" }, new String[] { "0", "1", "2", "3", "4" }, "2",
             new OnSet() { @Override public void set(String v) { smoothNote(v); } });
-        smoothNote = Ui.text(this, "", 15, false);
+        smoothNote = Ui.text(this, "", 14, false);
         list.addView(smoothNote);
-        smoothNote(host.get("KFB_SMOOTH"));
-        section("局部刷新（屏幕上一小块变化：点按钮、翻列表）");
-        stepper("局部刷新方式", "均衡：快，残影少；灰度最准：颜色最准，稍慢；最快：只有黑白，最灵敏，残影多；自动：和 Kindle 自己一样由驱动选。",
+        LinearLayout prevList = list;
+        customRefreshBox = new LinearLayout(this);
+        customRefreshBox.setOrientation(LinearLayout.VERTICAL);
+        list.addView(customRefreshBox);
+        list = customRefreshBox;
+        section("自定义细项（仅“自定义”模式生效）");
+        stepper("局部刷新方式", "均衡：快，残影少；灰度最准：最清晰，稍慢；最快：黑白快刷+自动补刷；自动：驱动自动选。",
             "KFB_MODE", new String[] { "均衡", "灰度最准", "最快", "自动（同 Kindle）" }, new String[] { "0", "1", "2", "3" }, "0", null);
-        stepper("快速滑动", "滚动、拖动列表时先用黑白快刷跟上手指，停下约 0.3 秒后再用 16 级灰度补刷一遍（清掉残影）。滑动时字会粗糙一点。",
+        stepper("快速滑动", "滚动、拖动列表时先用黑白快刷跟上手指，停下约 0.3 秒后再用 16 级灰度补刷清残影。",
             "KFB_SCROLLDU", new String[] { "关（默认）", "开" }, new String[] { "0", "300" }, "0", null);
-        stepper("图片灰度", "均衡方式下，小块变化里是图片（封面、头像、照片）的部分用 16 级灰度刷，不再变成黑白点阵；文字照旧快刷。图片会慢约 70 毫秒。",
+        stepper("滚动更跟手（极速 A2）", "手指拖动列表时改用更快的 A2 波形（PW6 约 6~7 帧/秒），停手自动清残影。",
+            "KFB_SCROLLWFM", new String[] { "标准（默认）", "极速（A2）" }, new String[] { "0", "1" }, "0", null);
+        stepper("图片灰度", "均衡方式下，小块变化里是图片的部分用 16 级灰度刷，文字照旧快刷。",
             "KFB_IMG", new String[] { "关（默认）", "开" }, new String[] { "0", "25" }, "0", null);
-        section("整页刷新（翻页、换页面）");
-        stepper("多大算整页", "一次变化超过屏幕的这么多，就用 16 级灰度的整页波形（清残影，约慢 70 毫秒）；小于它按局部刷新。",
+        stepper("多大算整页", "一次变化超过屏幕的这么多，就用 16 级灰度的整页波形；小于它按局部刷新。",
             "KFB_REAGL_MIN", new String[] { "三成", "翻页（默认）", "一半", "七成", "接近整屏" }, new String[] { "30", "35", "50", "70", "85" }, "35", null);
-        stepper("整屏闪刷", "每翻这么多页，整个屏幕黑白闪一下，彻底清掉残影（和 Kindle 的“页面刷新”一样）。",
+        list = prevList;
+        smoothNote(host.get("KFB_SMOOTH"));
+        section("通用显示与去残影");
+        stepper("界面刷新节奏", "30 Hz 最省电；60 Hz 触摸更跟手（耗电略增）。重启 Android 后生效。",
+            "KFB_HZ", new String[] { "30 Hz（省电）", "60 Hz（更跟手）" }, new String[] { "30", "60" }, "30", null);
+        stepper("整屏闪刷周期", "每翻这么多页，整个屏幕黑白闪一下，彻底清掉残影。",
             "KFB_FLASH", new String[] { "不按页数闪", "每页", "每 3 页", "每 6 页", "每 8 页", "每 10 页", "每 20 页" },
             new String[] { "0", "1", "3", "6", "8", "10", "20" }, "8", null);
         section("画面");
@@ -219,17 +233,56 @@ public class HostSettingsActivity extends Activity {
     private void smoothNote(String v) {
         if (smoothNote == null) return;
         boolean preset = v != null && !v.equals("0") && v.length() > 0;
-        smoothNote.setText(preset ? "现在由档位决定局部 / 整页刷新方式，下面两项改了也不起作用；要单独设先把档位改成“自定义”。" : "");
+        smoothNote.setText(preset ? "已按当前模式自动配好刷新与去残影参数（单应用可在“应用优化”里单独覆盖）；如需微调底层参数请切回“自定义”。" : "");
         smoothNote.setVisibility(preset ? View.VISIBLE : View.GONE);
+        if (customRefreshBox != null) customRefreshBox.setVisibility(preset ? View.GONE : View.VISIBLE);
+    }
+
+    private void buildWebviewOnly() {
+        section("网页内核（实验）");
+        stepper("网页内核", "新内核（Chromium 119）能打开更多现代网页（晋江验证码、新版登录页、网页书源）。打开后自动下载约 45 MB（占约 80 MB 空间），"
+            + "重启 Android 后生效。每个用网页的应用多占几十到一百多 MB 内存。切回自带内核后重启即可恢复并清理下载包。",
+            "WEBVIEW", new String[] { "自带（Chromium 52，省内存）", "新内核（Chromium 119）" }, new String[] { "stock", "alt" }, "stock",
+            new OnSet() { @Override public void set(String v) {
+                if ("stock".equals(v)) HostLink.cmd("webview cancel");
+                handler.postDelayed(new Runnable() { @Override public void run() { showWebview(); } }, 1500);
+            } });
+        webviewView = Ui.text(this, "", 17, false);
+        webviewView.setPadding(0, dp(6), 0, dp(6));
+        list.addView(webviewView);
+        LinearLayout wr = new LinearLayout(this);
+        webviewBtn = Ui.button(this, "", 17, true, new View.OnClickListener() {
+            @Override public void onClick(View v) { webviewAction(); }
+        });
+        wr.addView(webviewBtn, weight());
+        list.addView(wr);
+        showWebview();
+        webviewWatch = new CtlWatch.Listener() {
+            @Override public void onCtl(final String path) {
+                if ("webview.status".equals(path)) handler.post(new Runnable() { @Override public void run() { showWebview(); } });
+            }
+        };
+        CtlWatch.add(webviewWatch);
     }
 
     // ---- 系统与性能 ----------------------------------------------------------------------------------------------
 
     private void buildSystem() {
         section("Wi-Fi");
-        stepper("Wi-Fi 省电", "自动：平时省电，传书开着或大量下载时临时关掉省电；始终省电：下载慢、最省电；运行时关闭：下载快、耗电多。回到 Kindle 和屏保时一律还给 Kindle。",
-            "WIFI_PS", new String[] { "自动", "始终省电", "运行时关闭" }, new String[] { "auto", "on", "off" }, "auto", null);
+        stepper("Wi-Fi 省电", "自动（推荐）：平时省电，传书或大量下载时自动提速；始终省电：最省电但下载慢；运行时关闭：下载快、耗电多。回到 Kindle 和屏保时一律还给 Kindle。",
+            "WIFI_PS", new String[] { "自动（推荐）", "始终省电", "运行时关闭" }, new String[] { "auto", "on", "off" }, "auto", null);
+        section("省电与待机");
+        if (host.containsKey("IDLE_FREEZE")) {
+            stepper("看书空闲自动省电冻结", "看书不动屏幕且画面不变超过此时间，自动冻住安卓省电（CPU 0 唤醒）；一碰屏幕瞬间恢复，正在下载时自动跳过。默认已开 30 秒。",
+                "IDLE_FREEZE", new String[] { "关", "20 秒", "30 秒（推荐）", "60 秒", "120 秒" }, new String[] { "0", "20", "30", "60", "120" }, "30", null);
+        }
+        if (host.containsKey("SAVER_EXIT_H")) {
+            stepper("长时间锁屏自动回 Kindle", "在安卓里锁屏放置超过此时间，下次唤醒时直接退回 Kindle 释放内存，避免隔夜耗电。默认已开 8 小时。",
+                "SAVER_EXIT_H", new String[] { "不自动退出", "4 小时", "8 小时（推荐）", "24 小时" }, new String[] { "0", "4", "8", "24" }, "8", null);
+        }
         section("内存");
+        stepper("切应用自动冻结后台", "打开或切换应用时，立即冻结其他后台第三方应用（0% CPU、停止占内存，防止抢前台资源）；切回去时瞬间解冻恢复原页。在“应用优化”里设了“保持后台”的应用不受影响。",
+            "BG_FREEZE", new String[] { "开（推荐）", "关" }, new String[] { "1", "0" }, "1", null);
         stepper("小内存模式", "自动：内存不到约 700 MB 的机型（PW5、KT5、KT6）自动开。开着时 Kindle 的书库程序停掉腾内存、回 Kindle 完全退出（再进要重新开机）。下次启动 Android 生效。",
             "LOWMEM", new String[] { "自动", "开", "关" }, new String[] { "auto", "on", "off" }, "auto", null);
         stepper("Android 运行时 Kindle 界面", "只暂停：回 Kindle 最快；冻结：再把 Kindle 的后台程序冻住；停掉：腾出最多内存，回 Kindle 约一分钟。自动：小内存模式用“停掉”，否则“冻结”。下次启动 Android 生效。",
@@ -254,6 +307,13 @@ public class HostSettingsActivity extends Activity {
             }
         };
         CtlWatch.add(compileWatch);
+        section("输入法");
+        LinearLayout ir = new LinearLayout(this);
+        ir.setPadding(0, dp(6), 0, dp(6));
+        ir.addView(Ui.button(this, "输入法切换", 17, false, new View.OnClickListener() {
+            @Override public void onClick(View v) { startActivity(new Intent(HostSettingsActivity.this, ImeSettingsActivity.class)); }
+        }), weight());
+        list.addView(ir);
     }
 
     @Override protected void onPause() {

@@ -193,7 +193,7 @@ final class BlocksHome {
         }
         case FILES: return caps + "|" + files.sig();
         case APPS: return appsSig(caps, a.appsVersion());
-        case ME: return caps + "|" + Stats.monthMs(a) / 60000 + "|" + Stats.bookmarkCount(a) + "|" + Lib.version() + "|" + prefs.getString("name", "VeraDroid");
+        case ME: return caps + "|" + UiMode.isExpert(a) + "|" + Stats.monthMs(a) / 60000 + "|" + Stats.bookmarkCount(a) + "|" + Lib.version() + "|" + prefs.getString("name", "VeraDroid");
         case S_LIBRARY: return caps + "|" + Lib.version() + "|" + libSort;
         default: return caps + "|" + settings.sig(key);
         }
@@ -1152,22 +1152,20 @@ final class BlocksHome {
         LinearLayout devBox = new LinearLayout(a);
         devBox.setOrientation(LinearLayout.VERTICAL);
         devBox.setBackground(Blocks.frameDouble(a));
-        int ip = dp(4) + Blocks.stroke(a);
+        int ip = dp(3) + Blocks.stroke(a);
         devBox.setPadding(ip, ip, ip + Blocks.shade(a), ip + Blocks.shade(a));
         LinearLayout dev = new LinearLayout(a);
         dev.setGravity(Gravity.CENTER_VERTICAL);
-        dev.setPadding(dp(10), dp(10), dp(10), dp(10));
+        dev.setPadding(dp(10), dp(6), dp(10), dp(6));
         FrameLayout ib = new FrameLayout(a);
         ib.setBackground(Blocks.plain(a));
-        ib.addView(new Icons.IconView(a, Icons.Kind.DEVICE), new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER));
-        dev.addView(ib, Blocks.lp(dp(64), dp(64)));
+        ib.addView(new Icons.IconView(a, Icons.Kind.DEVICE), new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER));
+        dev.addView(ib, Blocks.lp(dp(52), dp(52)));
         LinearLayout dc = new LinearLayout(a);
         dc.setOrientation(LinearLayout.VERTICAL);
-        dc.setPadding(dp(14), 0, 0, 0);
-        dc.addView(Blocks.cap(a, "Local device"));
-        dc.addView(BlocksCards.line(a, prefs.getString("name", "VeraDroid").length() > 0 ? prefs.getString("name", "VeraDroid") : "VeraDroid", 19, true));
-        dc.addView(BlocksCards.line(a, model() + " · Android " + Build.VERSION.RELEASE, 14, false));
-        dc.addView(BlocksCards.line(a, "VeraHome " + version() + " · 构建 " + buildDate(), 13, false));
+        dc.setPadding(dp(12), 0, 0, 0);
+        dc.addView(BlocksCards.line(a, prefs.getString("name", "VeraDroid").length() > 0 ? prefs.getString("name", "VeraDroid") : "VeraDroid", 18, true));
+        dc.addView(BlocksCards.line(a, model() + " · Android " + Build.VERSION.RELEASE + " · VeraHome " + version(), 13, false));
         dev.addView(dc, Blocks.weight(1));
         devBox.addView(dev);
         devBox.addView(Blocks.hair(a));
@@ -1179,19 +1177,18 @@ final class BlocksHome {
             if (i > 0) r1.addView(Blocks.vrule(a), new LinearLayout.LayoutParams(Math.max(1, Blocks.stroke(a) - 1), ViewGroup.LayoutParams.MATCH_PARENT));
             LinearLayout cl = new LinearLayout(a);
             cl.setOrientation(LinearLayout.VERTICAL);
-            cl.setPadding(dp(10), dp(8), dp(6), dp(8));
-            TextView v = BlocksCards.line(a, cells[i][0], 18, true);
+            cl.setPadding(dp(10), dp(5), dp(6), dp(5));
+            TextView v = BlocksCards.line(a, cells[i][0], 17, true);
             if (i == 0) meBattery = v;
             cl.addView(v);
             cl.addView(BlocksCards.line(a, cells[i][1], 12, false));
-            cl.addView(Blocks.cap(a, cells[i][2]));
             r1.addView(cl, Blocks.weight(1));
         }
         devBox.addView(r1);
         content.addView(devBox, Blocks.gap(a, 2));
         // 后台在做的事：系统更新 / 安装应用 / 优化应用（方块进度小卡片，没有就不显示）
         content.addView(TaskCards.strip(a), Blocks.match());
-        content.addView(quickRow(st), Blocks.gap(a, 10));
+        content.addView(quickRow(st), Blocks.gap(a, 8));
         // 阅读统计
         int done = 0;
         if (a.libOn()) for (Lib.Book b : Lib.all()) if (b.percent >= 100) done++;
@@ -1205,25 +1202,56 @@ final class BlocksHome {
             v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View x) { a.startActivity(new Intent(a, StatsActivity.class)); a.overridePendingTransition(0, 0); } });
             Blocks.fast(v);
         }
-        content.addView(r2, Blocks.gap(a, 10));
-        // 设置分类
+        content.addView(r2, Blocks.gap(a, 8));
+        // 使用模式切换（紧凑单行：左说明 + 右一键切换，保证 5 个设置分类一屏全看完无需翻页）
+        final boolean expert = UiMode.isExpert(a);
+        LinearLayout modeBox = new LinearLayout(a);
+        modeBox.setOrientation(LinearLayout.HORIZONTAL);
+        modeBox.setGravity(Gravity.CENTER_VERTICAL);
+        modeBox.setBackground(Blocks.frame(a));
+        modeBox.setPadding(dp(12), dp(8), dp(10) + Blocks.shade(a), dp(8) + Blocks.shade(a));
+        LinearLayout modeL = new LinearLayout(a);
+        modeL.setOrientation(LinearLayout.VERTICAL);
+        modeL.addView(Ui.text(a, "使用模式", 16, true));
+        TextView mDesc = Ui.text(a, expert ? "资深模式 · 全部 DIY 开放" : "小白模式 · 省心防残影", 12, false);
+        modeL.addView(mDesc);
+        modeBox.addView(modeL, Blocks.weight(1));
+        Blocks.SegBar modeSeg = new Blocks.SegBar(a, new String[] { "小白", "资深" }, expert ? 1 : 0, new Blocks.SegBar.Listener() {
+            @Override public void onPick(int i) {
+                boolean toExpert = i == 1;
+                UiMode.setExpert(a, toExpert, !toExpert);
+                a.onUiModeChanged();
+                UiMode.guide(a, toExpert ? "已切到资深模式：全部高级自定义与单应用微调已开放" : "已切到小白模式：已套用清爽均衡画质与防残影默认设置");
+            }
+        });
+        modeBox.addView(modeSeg, Blocks.lp(dp(176), ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(modeBox, Blocks.gap(a, 8));
+
+        // 设置分类（按当前模式清晰分层，绝无重复项、绝不套娃，一屏全展示）
         LinearLayout sh = new LinearLayout(a);
         sh.setGravity(Gravity.BOTTOM);
-        sh.addView(Ui.text(a, "设备与设置", 16, true), Blocks.weight(1));
-        sh.addView(Blocks.cap(a, "Preferences"));
-        content.addView(sh, Blocks.gap(a, 14));
+        sh.addView(Ui.text(a, expert ? "系统设置（资深）" : "常用设置（小白）", 15, true), Blocks.weight(1));
+        sh.addView(Blocks.cap(a, expert ? "Expert settings" : "Simple settings"));
+        content.addView(sh, Blocks.gap(a, 8));
         LinearLayout list = new LinearLayout(a);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setBackground(Blocks.frameDouble(a));
-        int lp4 = dp(4) + Blocks.stroke(a);
+        int lp4 = dp(3) + Blocks.stroke(a);
         list.setPadding(lp4, lp4, lp4 + Blocks.shade(a), lp4 + Blocks.shade(a));
-        String[][] rows = {
-            { "首页卡片", "继续阅读 · 天气 · 日历 · 小部件…" },
-            { "显示与刷新", "亮度 · 刷新档位 · 全刷 · 界面风格" },
-            { "电源与时间", "自动休眠 · 回 Kindle · 时间格式" },
-            { "存储与连接", "Wi-Fi · 蓝牙 · Web 文件管理 · 存储空间" },
-            { "设备与关于", "版本 · 更新 · 日志 · 全部设置" } };
-        final int[] keys = { S_CARDS, S_DISPLAY, S_POWER, S_STORAGE, S_ABOUT };
+        String[][] rows = expert
+            ? new String[][] {
+                { "显示与刷新", "亮度 · 刷新模式/自定义波形 · 旋转 · 60Hz · 单应用优化" },
+                { "网络与传书", "Wi-Fi · 蓝牙 · DNS · 网页传书 · 无线调试 · 存储空间" },
+                { "电源与交互", "自动休眠 · 回 Kindle · 后台数 · 输入法 · 手势 · 时间" },
+                { "桌面与外观", "首页卡片 · 快捷应用 · 界面风格 · 面板 · 字重 · 壁纸" },
+                { "系统与维护", "设备信息 · 性能与内存 · 更新 · 统计 · 反馈 · 恢复" } }
+            : new String[][] {
+                { "阅读与显示", "亮度 · 一键阅读场景（高清/均衡/极速）· 字号 · 应用优化" },
+                { "网络与传书", "Wi-Fi 联网 · 蓝牙翻页器 · 手机网页传书 · 存储空间" },
+                { "系统与更新", "自动休眠 · 回 Kindle · 输入法切换 · 检查更新" } };
+        final int[] keys = expert
+            ? new int[] { S_DISPLAY, S_STORAGE, S_POWER, S_CARDS, S_ABOUT }
+            : new int[] { S_DISPLAY, S_STORAGE, S_POWER };
         for (int i = 0; i < rows.length; i++) {
             final int k = keys[i];
             if (i > 0) list.addView(Blocks.hair(a));
@@ -1257,10 +1285,10 @@ final class BlocksHome {
             c.setClickable(true);
             c.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
                 switch (idx) {
-                case 0: wifi[0] = !wifi[0]; HostLink.cmd("wifi " + (wifi[0] ? 1 : 0)); HostLink.cmd("status"); val.setText(wifi[0] ? "开" : "关"); break;
+                case 0: wifi[0] = !wifi[0]; HostLink.cmd("wifi " + (wifi[0] ? 1 : 0)); HostLink.cmd("status"); val.setText(wifi[0] ? "开" : "关"); UiMode.guide(a, wifi[0] ? "已开启 Wi-Fi" : "已关闭 Wi-Fi（更省电）"); break;
                 case 1: Panel.open(a); break;
-                case 2: HostLink.cmd("clear"); break;
-                default: int n = (Blocks.anim(a) + 1) % 3; prefs.edit().putInt(Blocks.ANIM_KEY, n).apply(); val.setText(Blocks.ANIM_L[n]); break;
+                case 2: HostLink.cmd("clear"); UiMode.guide(a, "已执行整屏刷新，残影已清除"); break;
+                default: int n = (Blocks.anim(a) + 1) % 3; prefs.edit().putInt(Blocks.ANIM_KEY, n).apply(); val.setText(Blocks.ANIM_L[n]); UiMode.guide(a, "桌面翻页动画已切到「" + Blocks.ANIM_L[n] + "」"); break;
                 }
             } });
             Blocks.fast(c);

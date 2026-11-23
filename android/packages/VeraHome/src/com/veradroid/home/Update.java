@@ -60,7 +60,7 @@ final class Update {
             + "&device_id=" + enc(device)
             + "&model=" + enc(model(c))
             + (token.length() > 0 ? "&token=" + enc(token) : "");
-        JSONObject j = new JSONObject(get(url));
+        JSONObject j = new JSONObject(get(url, c));
         android.util.Log.d("VeraUpdate", "json " + j);
         if (!j.optBoolean("update", false)) return "已是最新版本";
         long size = j.optLong("size", -1);
@@ -75,19 +75,32 @@ final class Update {
         out.delete();   // a leftover from an older install can belong to another uid: it cannot be overwritten, only replaced
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         HttpURLConnection h = (HttpURLConnection) new URL(apk).openConnection();
-        h.setConnectTimeout(20000); h.setReadTimeout(120000);
-        h.setRequestProperty("User-Agent", "VeraDroid/OTA");
-        InputStream in = new BufferedInputStream(h.getInputStream(), 65536);
-        FileOutputStream fo = new FileOutputStream(out);
-        byte[] buf = new byte[65536];
-        long done = 0; int n;
+        InputStream in = null;
+        FileOutputStream fo = null;
+        long done = 0;
         try {
+            h.setConnectTimeout(20000); h.setReadTimeout(120000);
+            h.setRequestProperty("User-Agent", "VeraDroid/OTA");
+            int dlCode = h.getResponseCode();
+            if (dlCode == 401 || dlCode == 403) {
+                Token.clear(c);
+                throw new BindGate.BindRequiredException(BindGate.OTA_REASON_TEXT);
+            }
+            if (dlCode >= 400) throw new Exception("HTTP " + dlCode);
+            in = new BufferedInputStream(h.getInputStream(), 65536);
+            fo = new FileOutputStream(out);
+            byte[] buf = new byte[65536];
+            int n;
             while ((n = in.read(buf)) > 0) {
                 fo.write(buf, 0, n);
                 md.update(buf, 0, n);
                 done += n;
             }
-        } finally { fo.close(); in.close(); h.disconnect(); }
+        } finally {
+            if (fo != null) try { fo.close(); } catch (Exception ignored) { }
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
         if ((size > 0 && done != size) || !hex(md.digest()).equalsIgnoreCase(sha)) {
             out.delete();
             return "下载校验失败";
@@ -139,13 +152,31 @@ final class Update {
 
     /** Check for a VeraHome APK update immediately (manual "check now"). */
     static void now(final Context c) {
+        if (c instanceof android.app.Activity) {
+            final android.app.Activity a = (android.app.Activity) c;
+            if (!BindGate.ensureBound(a, "系统 OTA 更新", BindGate.OTA_REASON_TEXT, new Runnable() {
+                @Override public void run() { now(c); }
+            })) return;
+        }
         new Thread(new Runnable() {
             @Override public void run() {
                 String msg;
                 try {
                     synchronized (CHECK_LOCK) { msg = check(c); }
-                }
-                catch (Throwable e) {
+                } catch (final BindGate.BindRequiredException be) {
+                    if (c instanceof android.app.Activity) {
+                        final android.app.Activity a = (android.app.Activity) c;
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                BindGate.showBindDialog(a, "系统 OTA 更新", be.getMessage(), new Runnable() {
+                                    @Override public void run() { now(c); }
+                                });
+                            }
+                        });
+                        return;
+                    }
+                    msg = be.getMessage();
+                } catch (Throwable e) {
                     android.util.Log.e("VeraUpdate", "manual check failed", e);
                     msg = "检查更新失败，请检查网络";
                 }
@@ -193,20 +224,29 @@ final class Update {
 
     private static JSONObject postJson(String url, String body) throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
-        h.setConnectTimeout(15000); h.setReadTimeout(30000);
-        h.setRequestMethod("POST");
-        h.setDoOutput(true);
-        h.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        h.setRequestProperty("User-Agent", "VeraDroid/Bind");
-        java.io.OutputStream o = h.getOutputStream();
-        o.write(body.getBytes("UTF-8")); o.close();
-        InputStream in = h.getResponseCode() >= 400 ? h.getErrorStream() : h.getInputStream();
+        java.io.OutputStream o = null;
+        InputStream in = null;
+        int code;
         java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
-        byte[] b = new byte[4096]; int n;
-        while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
-        if (in != null) in.close();
-        int code = h.getResponseCode();
-        h.disconnect();
+        try {
+            h.setConnectTimeout(15000); h.setReadTimeout(30000);
+            h.setRequestMethod("POST");
+            h.setDoOutput(true);
+            h.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            h.setRequestProperty("User-Agent", "VeraDroid/Bind");
+            o = h.getOutputStream();
+            o.write(body.getBytes("UTF-8"));
+            o.close();
+            o = null;
+            code = h.getResponseCode();
+            in = code >= 400 ? h.getErrorStream() : h.getInputStream();
+            byte[] b = new byte[4096]; int n;
+            while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
+        } finally {
+            if (o != null) try { o.close(); } catch (Exception ignored) { }
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
         JSONObject j = new JSONObject(bo.toString("UTF-8"));
         if (code >= 400 && j.optString("error", "").length() == 0) j.put("error", "HTTP " + code);
         return j;
@@ -214,18 +254,33 @@ final class Update {
 
     private static String enc(String s) throws Exception { return URLEncoder.encode(s == null ? "" : s, "UTF-8"); }
 
-    private static String get(String url) throws Exception {
+    private static String get(String url, Context c) throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
-        h.setConnectTimeout(15000); h.setReadTimeout(30000);
-        h.setRequestProperty("User-Agent", "VeraDroid/OTA");
+        InputStream in = null;
         try {
-            InputStream in = h.getInputStream();
+            h.setConnectTimeout(15000); h.setReadTimeout(30000);
+            h.setRequestProperty("User-Agent", "VeraDroid/OTA");
+            int code = h.getResponseCode();
+            in = code >= 400 ? h.getErrorStream() : h.getInputStream();
             java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
             byte[] b = new byte[8192]; int n;
-            while ((n = in.read(b)) > 0) bo.write(b, 0, n);
-            in.close();
-            return bo.toString("UTF-8");
-        } finally { h.disconnect(); }
+            while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
+            String raw = bo.toString("UTF-8");
+            if (code == 401 || code == 403) {
+                JSONObject j = null;
+                try { j = new JSONObject(raw); } catch (Exception ignored) { }
+                if (j != null && "bind_required".equals(j.optString("code"))) {
+                    Token.clear(c);
+                    throw new BindGate.BindRequiredException(j.optString("error", BindGate.OTA_REASON_TEXT));
+                }
+                throw new BindGate.BindRequiredException(j != null ? j.optString("error", BindGate.OTA_REASON_TEXT) : BindGate.OTA_REASON_TEXT);
+            }
+            if (code >= 400) throw new Exception("HTTP " + code);
+            return raw;
+        } finally {
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
     }
 
     private static String hex(byte[] b) {

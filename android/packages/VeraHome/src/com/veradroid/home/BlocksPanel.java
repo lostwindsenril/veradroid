@@ -69,7 +69,12 @@ final class BlocksPanel {
     private LinearLayout notesBox, notesList;
     private TextView notesHead;
     private final java.util.Map<String, Tile> tiles = new java.util.LinkedHashMap<String, Tile>();
-    private int wifiOn = 1, invertOn = 0, btOn = 0, animOn = 0, animLast = 1, lightfOn = 0;
+    private int wifiOn = 1, invertOn = 0, btOn = 0, animOn = 0, animLast = 1, lightfOn = 0, smoothMode = 2, globalSmoothMode = 2;
+    private LinearLayout refreshBox;
+    private TextView refreshHead;
+    private final TextView[] refreshBtns = new TextView[4];
+    private static final String[] REFRESH_LABELS = { "高清", "均衡", "快速", "极速" };
+    private static final int[] REFRESH_VALS = { 3, 2, 1, 4 };
     private String panelName = "";
     private String seen;
     private long seenStamp = -1;
@@ -189,6 +194,47 @@ final class BlocksPanel {
         }
         if (tiles.size() > 0) body.addView(row, Blocks.gap(ctx, 10));
 
+        // 刷新模式：对标文石 E-Ink 中心，下拉一点即切（高清 / 均衡 / 快速 / 极速 + 一键全刷）；
+        // 在第三方应用内切换自动按包名记忆（AppProf），切回该应用自动恢复；在桌面切换则改全局默认。
+        refreshBox = group("刷新模式");
+        refreshHead = (TextView) refreshBox.getChildAt(0);
+        LinearLayout rrow = new LinearLayout(ctx);
+        rrow.setPadding(dp(8), dp(8), dp(8), dp(8));
+        for (int i = 0; i < REFRESH_LABELS.length; i++) {
+            final int val = REFRESH_VALS[i];
+            TextView b = Ui.text(ctx, REFRESH_LABELS[i], 14, true);
+            b.setGravity(Gravity.CENTER);
+            b.setMinimumHeight(dp(44));
+            b.setClickable(true);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { pickRefresh(val); }
+            });
+            Blocks.fast(b);
+            refreshBtns[i] = b;
+            LinearLayout.LayoutParams rlp = Blocks.weight(1);
+            if (i > 0) rlp.leftMargin = dp(6);
+            rrow.addView(b, rlp);
+        }
+        TextView fullBtn = Ui.text(ctx, "全刷", 14, true);
+        fullBtn.setGravity(Gravity.CENTER);
+        fullBtn.setMinimumHeight(dp(44));
+        fullBtn.setBackground(Blocks.plain(ctx));
+        fullBtn.setTextColor(Color.BLACK);
+        fullBtn.setClickable(true);
+        fullBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                finish();
+                handler.postDelayed(new Runnable() { @Override public void run() { HostLink.cmd("clear"); } }, 500);
+            }
+        });
+        Blocks.fast(fullBtn);
+        LinearLayout.LayoutParams flp = Blocks.weight(1);
+        flp.leftMargin = dp(6);
+        rrow.addView(fullBtn, flp);
+        refreshBox.addView(rrow, Blocks.match());
+        paintRefresh();
+        body.addView(refreshBox, Blocks.gap(ctx, 12));
+
         // 屏幕光：一个分组，亮度一行（− 方块条 +），有暖光再一行，有光线传感器再加“自动”
         LinearLayout g = group("屏幕光");
         light = new Blocks.BlockBar(ctx, 12);
@@ -287,17 +333,54 @@ final class BlocksPanel {
     /** 面板底下那个应用（HostService 记的“按哪个应用算显示设置”）；桌面在前台 = null */
     private void syncApp() {
         String p = HostService.profPkg;
-        if (p == null || p.equals("home") || p.equals(ctx.getPackageName())) { appPkg = null; vis(appBar, false); return; }
+        if (p == null || p.equals("home") || p.equals(ctx.getPackageName())) {
+            appPkg = null;
+            vis(appBar, false);
+            set(refreshHead, "刷新模式 · 全局默认");
+            smoothMode = globalSmoothMode;
+            paintRefresh();
+            return;
+        }
         appPkg = p;
         String label = p;
         try { label = String.valueOf(ctx.getPackageManager().getApplicationLabel(ctx.getPackageManager().getApplicationInfo(p, 0))); } catch (Throwable ignored) { }
         String sum = "";
+        int appSmooth = globalSmoothMode;
         if (AppProf.host()) {
             String[] r = AppProf.lookup(AppProf.table(), p);
             sum = (r[0].startsWith("u") ? "" : r[0].equals("b") ? "推荐 · " : "") + AppProf.summary(r[1]);
+            String sm = AppProf.parse(r[1]).get("KFB_SMOOTH");
+            if (sm != null && sm.length() > 0) {
+                try { int v = Integer.parseInt(sm); if (v >= 1 && v <= 4) appSmooth = v; } catch (Throwable ignored) { }
+            }
         }
+        set(refreshHead, "刷新模式 · " + label + "（自动记忆）");
+        smoothMode = appSmooth;
+        paintRefresh();
         set(appHint, label + (sum.length() > 0 ? " · " + sum : ""));
         vis(appBar, true);
+    }
+
+    /** 切换刷新模式：第三方应用在前台时按包名自动记忆并立即生效；桌面在前台时改全局默认。 */
+    private void pickRefresh(int val) {
+        smoothMode = val;
+        paintRefresh();
+        if (appPkg != null && AppProf.host()) {
+            Map<String, String> m = AppProf.parse(AppProf.lookup(AppProf.table(), appPkg)[1]);
+            m.put("KFB_SMOOTH", String.valueOf(val));
+            m.remove("KFB_MODE");
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : m.entrySet()) {
+                if (sb.length() > 0) sb.append(';');
+                sb.append(e.getKey()).append('=').append(e.getValue());
+            }
+            AppProf.save(appPkg, sb.toString());
+            AppProf.fg(appPkg);
+            syncApp();
+        } else {
+            globalSmoothMode = val;
+            HostLink.settings("KFB_SMOOTH=" + val + "\n");
+        }
     }
 
     private void openAppDisplay() {
@@ -559,7 +642,26 @@ final class BlocksPanel {
         if (animOn > 0) animLast = animOn;
         lightfOn = Math.max(0, Math.min(3, HostLink.num(cfg, "KFB_LIGHTF", 0)));
         if (lightfOn > 0) Panel.lightfLast = lightfOn;
+        boolean hasSmooth = cfg.containsKey("KFB_SMOOTH");
+        vis(refreshBox, hasSmooth);
+        if (hasSmooth) {
+            globalSmoothMode = HostLink.num(cfg, "KFB_SMOOTH", 2);
+            if (appPkg == null) {
+                smoothMode = globalSmoothMode;
+                paintRefresh();
+            }
+        }
         paintTiles();
+    }
+
+    private void paintRefresh() {
+        for (int i = 0; i < refreshBtns.length; i++) {
+            TextView b = refreshBtns[i];
+            if (b == null) continue;
+            boolean on = (smoothMode == REFRESH_VALS[i]);
+            b.setBackground(on ? Blocks.plainFilled(ctx) : Blocks.plain(ctx));
+            b.setTextColor(on ? Color.WHITE : Color.BLACK);
+        }
     }
 
     private void tile(String id, boolean on) { Tile t = tiles.get(id); if (t != null) t.set(on); }

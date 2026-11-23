@@ -151,7 +151,7 @@ final class Theme {
     }
 
     private static void dropWall() {
-        if (wall != null && !wall.isRecycled()) wall.recycle();
+        // 不在后台线程 recycle()：旧壁纸可能正被主线程上的 WallDrawable.draw() 画着，直接丢掉引用交给 GC 回收
         wall = null; wallKey = "";
     }
 

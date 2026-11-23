@@ -75,17 +75,16 @@ public class AppDisplayActivity extends Activity {
     static String[] withFollow(String... a) { String[] r = new String[a.length + 1]; r[0] = "跟随"; System.arraycopy(a, 0, r, 1, a.length); return r; }
     static String[] vals(String... a) { String[] r = new String[a.length + 1]; System.arraycopy(a, 0, r, 1, a.length); return r; }
 
-    /** 内置的选项（宿主一直认得的 KFB_* 键）。hasScroll：老机型的显示桥没有快速滑动 / 图片灰度。 */
+    /** 内置的选项（与全局统一 4 档刷新模式，消除与全局画质冲突）。 */
     static List<Knob> builtinKnobs(boolean hasScroll) {
         List<Knob> k = new ArrayList<Knob>();
-        k.add(new Knob("KFB_MODE", "刷新方式", withFollow("均衡", "灰度最准", "最快"), vals("0", "1", "2")));
-        k.add(new Knob("KFB_FLASH", "每几页全刷", withFollow("每页", "3", "6", "10"), vals("1", "3", "6", "10")));
+        k.add(new Knob("KFB_SMOOTH", "刷新模式（单独选一项即覆盖全局）", withFollow("高清", "均衡", "快速", "极速"), vals("3", "2", "1", "4")));
+        k.add(new Knob("KFB_FLASH", "每几页整屏去残影", withFollow("不闪", "每页", "3 页", "6 页", "10 页"), vals("0", "1", "3", "6", "10")));
         if (hasScroll) {
-            k.add(new Knob("KFB_SCROLLDU", "快速滑动（滚动时先黑白快刷，停下再补灰度）", withFollow("开", "关"), vals("300", "0")));
-            k.add(new Knob("KFB_IMG", "图片灰度（漫画 / 图片用 16 级灰，不用黑白点阵）", withFollow("开", "关"), vals("25", "0")));
+            k.add(new Knob("KFB_IMG", "图片灰度（漫画 / 封面用 16 级灰）", withFollow("开", "关"), vals("25", "0")));
         }
-        k.add(new Knob("KFB_CONTRAST", "对比度", withFollow("1.0", "1.3", "1.5", "2.0", "2.5"), vals("1.0", "1.3", "1.5", "2.0", "2.5")));
-        k.add(new Knob("KFB_LIGHTF", "浅色过滤（浅灰 / 米色底变纯白，闪刷少）", withFollow("关", "弱", "中", "强"), vals("0", "1", "2", "3")));
+        k.add(new Knob("KFB_CONTRAST", "对比度", withFollow("1.0", "1.3", "1.6", "1.9", "2.2"), vals("1.0", "1.3", "1.6", "1.9", "2.2")));
+        k.add(new Knob("KFB_LIGHTF", "浅色过滤（浅灰底变纯白）", withFollow("关", "弱", "中", "强"), vals("0", "1", "2", "3")));
         k.add(new Knob("KFB_DARKEN", "深色加深（浅灰字变黑）", withFollow("关", "开"), vals("0", "1")));
         k.add(new Knob("KFB_ANIM_MODE", "翻页动画", withFollow("开", "关"), vals("1", "0")));
         return k;
@@ -132,7 +131,7 @@ public class AppDisplayActivity extends Activity {
     private String pkg, label;
     private Seg font, keep;
     private List<Knob> knobs;
-    private boolean newHost, hasScroll, hostKeep;
+    private boolean newHost, hasScroll, hostKeep, dirty, savedOrReset;
     private java.util.Map<String, String[]> table;
     private TextView status;
 
@@ -150,11 +149,11 @@ public class AppDisplayActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
-        root.setPadding(dp(18), dp(12), dp(18), dp(16));
+        root.setPadding(dp(16), dp(10), dp(16), dp(10));
         LinearLayout hd = new LinearLayout(this);
         hd.setOrientation(LinearLayout.HORIZONTAL); hd.setGravity(Gravity.CENTER_VERTICAL);
         hd.addView(Icons.bar(this, Icons.Kind.BACK, 28, new View.OnClickListener() {
-            @Override public void onClick(View v) { finish(); }
+            @Override public void onClick(View v) { onBackPressed(); }
         }));
         TextView t = Ui.text(this, label + " · 应用优化", 23, true); t.setPadding(dp(10), 0, 0, 0);
         hd.addView(t); root.addView(hd);
@@ -162,6 +161,7 @@ public class AppDisplayActivity extends Activity {
         root.addView(hdRule);
         Blocks.restyleTop(this, root, hd, hdRule, "Optimise / per app", label + " · 应用优化", null);
         newHost = AppProf.host();
+        final boolean expert = UiMode.isExpert(this);
         // 老机型（legacy）的显示桥没有快速滑动 / 图片灰度：宿主发布的设置里没有这两个键就不显示
         hasScroll = HostLink.kv(HostLink.KFB + "settings").containsKey("KFB_SCROLLDU");
         if (newHost) table = AppProf.table();
@@ -169,62 +169,155 @@ public class AppDisplayActivity extends Activity {
         if (newHost) { hostLines = readLines(KNOBS); hostLines.addAll(pkgLines(readLines(KNOBS_PKG), pkg)); }
         knobs = knobs(hasScroll, hostLines);
         for (Knob k : knobs) if (KEEP_KEY.equals(k.key)) hostKeep = true;
-        String src = newHost ? AppProf.lookup(table, pkg)[0] : "";
-        TextView hint = Ui.text(this, (newHost
-            ? (src.startsWith("u") ? "已为这个应用单独设置。" : src.equals("b") ? "现在用的是内置推荐（" + AppProf.summary(AppProf.lookup(table, pkg)[1]) + "）。" : "现在跟随全局设置。")
-              + "“跟随”用全局设置；保存后马上生效，切到这个应用时自动换上。“恢复默认”回到内置推荐。"
-            : "“跟随”用全局设置；改完下次打开这个应用时生效。") + "字号只在这个应用在前台时用，回到桌面恢复全局字号。", 14, false);
-        hint.setTextColor(Blocks.on(this) ? Color.BLACK : Color.DKGRAY); hint.setPadding(0, dp(8), 0, dp(8)); root.addView(hint);
-        // 按钮放在最上面：项目多了以后放在底下会被挤出屏幕（小屏机型更是）
-        LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.RIGHT);
+
+        // 顶部固定操作条（翻页时始终可见，不会被挤出屏幕）
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.RIGHT);
+        row.setPadding(0, dp(6), 0, dp(6));
         row.addView(Ui.button(this, newHost ? "恢复默认" : "恢复跟随", 16, false, new View.OnClickListener() {
             @Override public void onClick(View v) {
+                savedOrReset = true;
                 Store.prefs(AppDisplayActivity.this, "home").edit().remove("appdisp_" + pkg).commit();
                 AppFont.set(AppDisplayActivity.this, pkg, 0f);
                 if (newHost) AppProf.save(pkg, ""); else HostLink.cmd("appdisp home");
+                UiMode.guide(AppDisplayActivity.this, label + " 已恢复默认推荐配置");
                 finish();
             }
         }));
         row.addView(Ui.button(this, "完成", 16, true, new View.OnClickListener() {
-            @Override public void onClick(View v) { save(); finish(); }
+            @Override public void onClick(View v) {
+                savedOrReset = true;
+                save();
+                UiMode.guide(AppDisplayActivity.this, "已保存「" + label + "」专属优化，切入该应用立即生效");
+                finish();
+            }
         }));
         root.addView(row);
 
-        for (Knob k : knobs) {
-            if (!newHost && !k.key.startsWith("KFB_")) continue;   // 老宿主只认 appdisp 的 KFB_* 键
-            k.seg = seg(root, k.title, k.labels);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(0, dp(4), 0, dp(10));
+        String src = newHost ? AppProf.lookup(table, pkg)[0] : "";
+        TextView hint = Ui.text(this, (newHost
+            ? (src.startsWith("u") ? "已为这个应用单独设置。" : src.equals("b") ? "现在用的是内置推荐（" + AppProf.summary(AppProf.lookup(table, pkg)[1]) + "）。" : "现在跟随全局设置。")
+              + "“跟随”= 用全局；点击下方任意选项会即时说明效果，点右上角“完成”生效。"
+            : "“跟随”= 用全局；改完点右上角“完成”生效。"), 13, false);
+        hint.setTextColor(Blocks.on(this) ? Color.BLACK : Color.DKGRAY); hint.setPadding(0, dp(2), 0, dp(8)); body.addView(hint);
+
+        if (!expert) {
+            // 小白模式：放 6 个最核心且小白最常用的选项（刷新模式、对比度、浅色过滤漂白、深色加深、字号、保持后台）
+            section(body, "常用应用优化（小白模式 · 退出自动保存）");
+            for (Knob k : knobs) {
+                if ("KFB_SMOOTH".equals(k.key) || "KFB_CONTRAST".equals(k.key)
+                    || "KFB_LIGHTF".equals(k.key) || "KFB_DARKEN".equals(k.key)) {
+                    k.seg = segKnob(body, k);
+                }
+            }
+            font = seg(body, "应用字号（仅对当前应用生效）", AppFont.LABELS, new Seg.Listener() {
+                @Override public void onPick(int idx) {
+                    dirty = true;
+                    UiMode.guide(AppDisplayActivity.this, idx == 0 ? "字号设为跟随全局" : "该应用字号已选「" + AppFont.LABELS[idx] + "」");
+                }
+            });
+            if (hostKeep) {
+                for (Knob k : knobs) if (KEEP_KEY.equals(k.key)) k.seg = segKnob(body, k);
+            } else if (Cleaner.userApp(this, pkg)) {
+                keep = seg(body, "保持后台（不被自动清理）", new String[] { "关", "开" }, new Seg.Listener() {
+                    @Override public void onPick(int idx) {
+                        dirty = true;
+                        UiMode.guide(AppDisplayActivity.this, idx == 1 ? "开启保持后台：切走后不会自动清理，下次秒回原位置" : "关闭保持后台：切走闲置时自动释放内存");
+                    }
+                });
+            }
+            TextView tip = Ui.text(this, "提示：改动后返回会自动保存；如需调整弹窗黑边、取消惯性、强黑体、自定义 DPI 等 15+ 项微调，可在「我的 → 使用模式」切到资深模式。", 13, false);
+            tip.setPadding(0, dp(12), 0, dp(4));
+            body.addView(tip);
+        } else {
+            // 资深模式：按文石“应用优化”逻辑分成 3 个清晰分组，并带底部显式翻页条，绝不显示不全
+            List<Knob> gRefresh = new ArrayList<Knob>(), gLayout = new ArrayList<Knob>(), gBg = new ArrayList<Knob>();
+            for (Knob k : knobs) {
+                if (!newHost && !k.key.startsWith("KFB_")) continue;
+                if (k.key.startsWith("OEC_W") || k.key.equals("KEEPALIVE") || k.key.equals("BGSTOP") || k.key.equals("SLIM")) gBg.add(k);
+                else if (k.key.startsWith("OEC_")) gLayout.add(k);
+                else gRefresh.add(k);
+            }
+            section(body, "一、刷新与画质");
+            for (Knob k : gRefresh) k.seg = segKnob(body, k);
+            section(body, "二、排版与交互");
+            font = seg(body, "应用字号（仅对当前应用生效）", AppFont.LABELS, new Seg.Listener() {
+                @Override public void onPick(int idx) {
+                    UiMode.guide(AppDisplayActivity.this, idx == 0 ? "字号设为跟随全局" : "该应用字号已选「" + AppFont.LABELS[idx] + "」，点“完成”后生效");
+                }
+            });
+            for (Knob k : gLayout) k.seg = segKnob(body, k);
+            section(body, "三、网页与后台");
+            for (Knob k : gBg) k.seg = segKnob(body, k);
+            if (!hostKeep && Cleaner.userApp(this, pkg))
+                keep = seg(body, "保持后台（不被自动清理）", new String[] { "关", "开" }, new Seg.Listener() {
+                    @Override public void onPick(int idx) {
+                        UiMode.guide(AppDisplayActivity.this, idx == 1 ? "开启保持后台：切走后不会自动清理，下次秒回原位置" : "关闭保持后台：切走闲置时自动释放内存");
+                    }
+                });
         }
-        font = seg(root, "字号（小 0.85 倍 · 标准 · 大 1.4 倍 · 特大 2 倍）", AppFont.LABELS);
-        if (!hostKeep && Cleaner.userApp(this, pkg))
-            keep = seg(root, "保持后台（不被自动清理和“全部关闭”关掉；切换应用里的锁是同一个开关）", new String[] { "关", "开" });
 
         status = Ui.text(this, "", 13, false); status.setTextColor(Blocks.on(this) ? Color.BLACK : Color.DKGRAY);
-        status.setPadding(0, dp(10), 0, dp(6)); root.addView(status);
+        status.setPadding(0, dp(6), 0, dp(4)); body.addView(status);
 
         if (Blocks.on(this)) {
-            View sh = Blocks.sheet(this, root, false);
-            root.setPadding(root.getPaddingLeft(), Ui.dp(this, 14), root.getPaddingRight(), root.getPaddingBottom());
-            setContentView(pageScroll(sh));
-        } else
-        setContentView(pageScroll(root));
-        // 方块风格：整屏白底（不透明的窗口下面不画，留着上下的空会是黑的），单子在上面
-        w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, Blocks.on(this) ? ViewGroup.LayoutParams.MATCH_PARENT : ViewGroup.LayoutParams.WRAP_CONTENT);
+            root.addView(Blocks.paged(this, body), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            setContentView(root);
+        } else {
+            final PageScrollView sv = new PageScrollView(this);
+            sv.setFillViewport(true);
+            sv.addView(body, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            root.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            LinearLayout nav = new LinearLayout(this);
+            nav.addView(Ui.button(this, "上一页", 16, false, new View.OnClickListener() { @Override public void onClick(View v) { sv.page(-1); } }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            nav.addView(Ui.button(this, "下一页", 16, false, new View.OnClickListener() { @Override public void onClick(View v) { sv.page(1); } }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            root.addView(nav);
+            setContentView(root);
+        }
+        w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
         load();
     }
 
-    /** 一屏放不下时整页翻（墨水屏上不拖动、不惯性）。 */
-    private View pageScroll(View v) {
-        PageScrollView sv = new PageScrollView(this);
-        sv.setFillViewport(true);
-        sv.addView(v, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return sv;
+    private void section(LinearLayout root, String title) {
+        TextView h = Ui.text(this, title, 16, true);
+        h.setTextColor(Color.BLACK);
+        h.setPadding(0, dp(14), 0, dp(4));
+        root.addView(h);
+        root.addView(Ui.rule(this, 2, Color.BLACK));
     }
 
-    private Seg seg(LinearLayout root, String title, String[] labels) {
+    private Seg segKnob(LinearLayout root, final Knob k) {
+        return seg(root, k.title, k.labels, new Seg.Listener() {
+            @Override public void onPick(int idx) {
+                dirty = true;
+                if (idx == 0) UiMode.guide(AppDisplayActivity.this, "「" + k.title + "」设为跟随全局设置");
+                else UiMode.guide(AppDisplayActivity.this, UiMode.keyEffect(k.key, k.values[idx], k.labels[idx]));
+            }
+        });
+    }
+
+    @Override public void onBackPressed() {
+        if (dirty && !savedOrReset) {
+            savedOrReset = true;
+            save();
+            UiMode.guide(this, "已自动保存「" + label + "」专属优化");
+        }
+        super.onBackPressed();
+    }
+
+    private Seg seg(LinearLayout root, String title, String[] labels, Seg.Listener l) {
+        // 标题和选项按钮打包成一整块：PageScrollView 翻页时绝不会把标题留在上一页、按钮拆到下一页
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setPadding(0, dp(10), 0, dp(4));
         TextView h = Ui.text(this, title, 14, true); h.setTextColor(Blocks.on(this) ? Color.BLACK : Color.DKGRAY);
-        h.setPadding(0, dp(10), 0, dp(4)); root.addView(h);
-        Seg s = new Seg(this, labels, 13, null);
-        root.addView(s, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        h.setPadding(0, 0, 0, dp(4)); item.addView(h);
+        Seg s = new Seg(this, labels, 13, l);
+        item.addView(s, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(item, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return s;
     }
 

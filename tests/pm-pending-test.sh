@@ -8,8 +8,6 @@ fail() { echo "FAIL: $*"; exit 1; }
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT
 for h in pw6 k49 legacy; do
-    # combined tree: host/legacy is the legacy line's own release (docs/legacy-line.md); checked once it has the change
-    [ $h = legacy ] && ! grep -q '^pm_pending_guard()' host/legacy/boot/lib/framework.sh && { echo "  note: host/legacy has no pm_pending_guard yet - skipped"; continue; }
     f=host/$h/boot/lib/framework.sh
     sh -n $f || fail "syntax $f"
     awk '/^framework_stop\(\)/,/^}/' $f | sed -n 2,3p | grep -q '^    pm_pending_guard$' || fail "$h framework_stop does not run the guard first"

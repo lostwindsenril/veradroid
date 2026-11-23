@@ -29,15 +29,20 @@ final class StoreNet {
 
     static JSONObject json(String url) throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
-        h.setConnectTimeout(15000); h.setReadTimeout(30000);
-        h.setRequestProperty("User-Agent", "VeraDroid/Store");
-        int code = h.getResponseCode();
-        InputStream in = code >= 400 ? h.getErrorStream() : h.getInputStream();
+        InputStream in = null;
+        int code;
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
-        byte[] b = new byte[8192]; int n;
-        while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
-        if (in != null) in.close();
-        h.disconnect();
+        try {
+            h.setConnectTimeout(15000); h.setReadTimeout(30000);
+            h.setRequestProperty("User-Agent", "VeraDroid/Store");
+            code = h.getResponseCode();
+            in = code >= 400 ? h.getErrorStream() : h.getInputStream();
+            byte[] b = new byte[8192]; int n;
+            while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
+        } finally {
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
         JSONObject j;
         try { j = new JSONObject(bo.toString("UTF-8")); }
         catch (Exception e) { throw new Exception(code >= 400 ? "HTTP " + code : "服务器的回答看不懂"); }
@@ -55,22 +60,39 @@ final class StoreNet {
             File f = new File(Store.cache("store-img"), key);
             if (!f.isFile() || f.length() == 0) {
                 HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
+                InputStream in = null;
                 try {
                     h.setConnectTimeout(10000); h.setReadTimeout(20000);
                     h.setRequestProperty("User-Agent", "VeraDroid/Store");
                     if (h.getResponseCode() != 200) return null;
-                    InputStream in = h.getInputStream();
+                    in = h.getInputStream();
                     ByteArrayOutputStream bo = new ByteArrayOutputStream();
                     byte[] b = new byte[16384]; int n;
-                    while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > (2 << 20)) { in.close(); return null; } }
-                    in.close();
+                    while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > (2 << 20)) return null; }
                     Dl.write(f, bo.toByteArray());
-                } finally { h.disconnect(); }
+                } finally {
+                    if (in != null) try { in.close(); } catch (Exception ignored) { }
+                    h.disconnect();
+                }
             }
-            android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeFile(f.getPath());
+            android.graphics.Bitmap bm = decodeBounded(f.getPath(), 128);
             if (bm == null) f.delete();
             return bm;
         } catch (Throwable t) { return null; }
+    }
+
+    private static android.graphics.Bitmap decodeBounded(String path, int maxDim) {
+        android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+        opts.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeFile(path, opts);
+        if (opts.outWidth <= 0 || opts.outHeight <= 0) return null;
+        int sample = 1;
+        while ((opts.outWidth / sample) > maxDim || (opts.outHeight / sample) > maxDim) {
+            sample *= 2;
+        }
+        opts.inJustDecodeBounds = false;
+        opts.inSampleSize = sample;
+        return android.graphics.BitmapFactory.decodeFile(path, opts);
     }
 
     static String sha256(File f) throws Exception {

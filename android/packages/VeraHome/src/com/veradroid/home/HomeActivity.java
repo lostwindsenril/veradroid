@@ -183,6 +183,19 @@ public class HomeActivity extends Activity {
         return i;
     }
 
+    private static volatile boolean crashHandlerInstalled;
+    private static void installCrashHandler(final Context appCtx) {
+        if (crashHandlerInstalled) return;
+        crashHandlerInstalled = true;
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override public void uncaughtException(Thread th, Throwable e) {
+                DiagConsent.onCrash(appCtx);   // 先问再传（DiagConsent）：没选过就只记下，下次起来时问
+                if (prev != null) prev.uncaughtException(th, e);
+            }
+        });
+    }
+
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         builtDpi = getResources().getConfiguration().densityDpi;
@@ -190,13 +203,7 @@ public class HomeActivity extends Activity {
         standalone = getClass() != HomeActivity.class;
         // If VeraHome itself dies, queue a system diagnostic upload before the
         // process goes away. The host watchdog catches native crashes separately.
-        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
-        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-            @Override public void uncaughtException(Thread th, Throwable e) {
-                DiagConsent.onCrash(getApplicationContext());   // 先问再传（DiagConsent）：没选过就只记下，下次起来时问
-                if (prev != null) prev.uncaughtException(th, e);
-            }
-        });
+        installCrashHandler(getApplicationContext());
         pm = getPackageManager();
         prefs = Store.prefs(this, "home");
         Store.purgeLegacyCloud();
@@ -346,6 +353,7 @@ public class HomeActivity extends Activity {
             // 自动更新选了“只提醒”而宿主发现了新版本：列出更新内容让用户选。上面刚让宿主重写状态（status），等它写完再看
             handler.removeCallbacks(updateNotice);
             handler.postDelayed(updateNotice, 2000);
+            handler.postDelayed(new Runnable() { @Override public void run() { if (resumed && !inSettings && !standalone) UiMode.maybeAsk(HomeActivity.this); } }, 1200);
         }
         if (libReady) Lib.scan(this, 20000);
         handler.removeCallbacks(tick);
@@ -359,6 +367,19 @@ public class HomeActivity extends Activity {
     }
 
     private final Runnable updateNotice = new Runnable() { @Override public void run() { if (resumed && !isFinishing()) SysUpdate.maybeNotify(HomeActivity.this); } };
+
+    /** 小白模式 / 资深模式切换后刷新「我的」与各设置页的菜单结构。 */
+    void onUiModeChanged() {
+        if (blocks != null) {
+            blocks.invalidate(BlocksHome.ME);
+            blocks.invalidate(BlocksHome.S_DISPLAY);
+            blocks.invalidate(BlocksHome.S_POWER);
+            blocks.invalidate(BlocksHome.S_STORAGE);
+            blocks.invalidate(BlocksHome.S_ABOUT);
+            blocks.invalidate(BlocksHome.S_CARDS);
+            if (Blocks.on(this)) { blocks.show(blocks.current()); changed(); }
+        }
+    }
 
     /** 这次离开主页是去开别的应用（不是自己的阅读器 / 设置页），回来时才取它的画面。 */
     private boolean leftForApp, ownStart;

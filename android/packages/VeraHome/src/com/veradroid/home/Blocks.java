@@ -368,24 +368,26 @@ final class Blocks {
         return t;
     }
 
-    /** 列表里一行可以点的条目：居中的中文 + 小字说明，右边一个 ›（“我的”页的设置分类）。 */
+    /** 列表里一行可以点的条目：左对齐标题 + 小字说明，右边一个 ›（与普通设置行保持统一视觉层级）。 */
     static LinearLayout navRow(Context c, String zh, String hint, View.OnClickListener l) {
         LinearLayout r = new LinearLayout(c);
         r.setOrientation(LinearLayout.HORIZONTAL);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(dp(c, 12), dp(c, 10), dp(c, 8), dp(c, 10));
-        r.setMinimumHeight(dp(c, 64));
+        r.setPadding(dp(c, 12), dp(c, 9), dp(c, 10), dp(c, 9));
+        r.setMinimumHeight(dp(c, 56));
         LinearLayout mid = new LinearLayout(c);
         mid.setOrientation(LinearLayout.VERTICAL);
-        mid.setGravity(Gravity.CENTER_HORIZONTAL);
-        TextView t = Ui.text(c, zh, 18, true);
-        t.setGravity(Gravity.CENTER);
+        mid.setGravity(Gravity.LEFT);
+        TextView t = Ui.text(c, zh, 17, true);
+        t.setGravity(Gravity.LEFT);
         mid.addView(t);
         if (hint != null) {
             TextView h = Ui.text(c, hint, 12, false);
-            h.setGravity(Gravity.CENTER);
-            h.setSingleLine(true);
+            h.setGravity(Gravity.LEFT);
+            h.setSingleLine(false);
+            h.setMaxLines(2);
             h.setEllipsize(TextUtils.TruncateAt.END);
+            h.setPadding(0, dp(c, 2), 0, 0);
             mid.addView(h);
         }
         r.addView(mid, weight(1));
@@ -719,7 +721,8 @@ final class Blocks {
         mid.addView(t);
         if (hint != null && hint.length() > 0) {
             TextView h = Ui.text(c, hint, 12, false);
-            h.setSingleLine(true);
+            h.setSingleLine(false);
+            h.setMaxLines(2);
             h.setEllipsize(TextUtils.TruncateAt.END);
             mid.addView(h);
         }
@@ -780,13 +783,16 @@ final class Blocks {
             setGravity(Gravity.CENTER_VERTICAL);
             int h = dp(c, 44);
             addView(arrow(c, Icons.Kind.BACK, -1), new LinearLayout.LayoutParams(dp(c, 44), h));
-            value = Ui.text(c, labels[this.index], 16, true);
+            value = Ui.text(c, labels[this.index], 15, true);
             value.setGravity(Gravity.CENTER);
-            value.setSingleLine(true);
+            value.setSingleLine(false);
+            value.setMaxLines(2);
+            value.setMinHeight(h);
+            value.setPadding(dp(c, 4), dp(c, 2), dp(c, 4), dp(c, 2));
             value.setEllipsize(TextUtils.TruncateAt.END);
             value.setBackground(plainFilled(c));
             value.setTextColor(Color.WHITE);
-            LinearLayout.LayoutParams vp = new LinearLayout.LayoutParams(dp(c, 132), h);
+            LinearLayout.LayoutParams vp = new LinearLayout.LayoutParams(dp(c, 136), ViewGroup.LayoutParams.WRAP_CONTENT);
             vp.leftMargin = dp(c, 4); vp.rightMargin = dp(c, 4);
             addView(value, vp);
             addView(arrow(c, Icons.Kind.CHEV_R, 1), new LinearLayout.LayoutParams(dp(c, 44), h));
@@ -914,18 +920,21 @@ final class Blocks {
             int st = stroke(c);
             setPadding(st, st, st + shade(c), st + shade(c));
             cells = new TextView[labels.length];
+            float textSp = labels.length >= 4 ? 14 : 15;
+            int barH = dp(c, 46);
             for (int i = 0; i < labels.length; i++) {
                 final int idx = i;
-                TextView t = Ui.text(c, labels[i], 15, true);
+                TextView t = Ui.text(c, labels[i], textSp, true);
                 t.setGravity(Gravity.CENTER);
-                t.setSingleLine(true);
-                t.setMinHeight(dp(c, 40));
+                t.setSingleLine(false);
+                t.setMaxLines(2);
+                t.setPadding(dp(c, 4), dp(c, 2), dp(c, 4), dp(c, 2));
                 t.setClickable(true);
                 t.setOnClickListener(new OnClickListener() { @Override public void onClick(View v) { if (idx != selected) { select(idx); if (l != null) l.onPick(idx); } } });
                 Blocks.fast(t);
                 cells[i] = t;
-                LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-                if (i > 0) { View sep = new View(c); sep.setBackgroundColor(Color.BLACK); addView(sep, new LinearLayout.LayoutParams(2, ViewGroup.LayoutParams.MATCH_PARENT)); }
+                LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, barH, 1);
+                if (i > 0) { View sep = new View(c); sep.setBackgroundColor(Color.BLACK); addView(sep, new LinearLayout.LayoutParams(2, barH)); }
                 addView(t, p);
             }
             select(sel);
@@ -957,8 +966,8 @@ final class Blocks {
             setGravity(Gravity.CENTER_VERTICAL);
             setBackground(frame(c));
             setPadding(0, 0, shade(c), shade(c));
-            int h = dp(c, 42);
-            addView(arrow(c, Icons.Kind.BACK, -1, l), new LinearLayout.LayoutParams(dp(c, 64), h));
+            int h = dp(c, 44);
+            addView(pageBtn(c, "‹ 上一页", -1, l), new LinearLayout.LayoutParams(dp(c, 108), h));
             addView(vrule(c), new LinearLayout.LayoutParams(stroke(c), h));
             LinearLayout mid = new LinearLayout(c);
             mid.setGravity(Gravity.CENTER);
@@ -971,16 +980,17 @@ final class Blocks {
             mid.addView(total);
             addView(mid, new LinearLayout.LayoutParams(0, h, 1));
             addView(vrule(c), new LinearLayout.LayoutParams(stroke(c), h));
-            addView(arrow(c, Icons.Kind.CHEV_R, 1, l), new LinearLayout.LayoutParams(dp(c, 64), h));
+            addView(pageBtn(c, "下一页 ›", 1, l), new LinearLayout.LayoutParams(dp(c, 108), h));
         }
 
-        private View arrow(Context c, Icons.Kind k, final int dir, final Listener l) {
-            FrameLayout f = new FrameLayout(c);
-            f.addView(new Icons.IconView(c, k), new FrameLayout.LayoutParams(dp(c, 18), dp(c, 18), Gravity.CENTER));
-            f.setClickable(true);
-            f.setOnClickListener(new OnClickListener() { @Override public void onClick(View v) { if (l != null) l.onPage(dir); } });
-            Blocks.fast(f);
-            return f;
+        private View pageBtn(Context c, String label, final int dir, final Listener l) {
+            TextView t = Ui.text(c, label, 15, true);
+            t.setGravity(Gravity.CENTER);
+            t.setTextColor(Color.BLACK);
+            t.setClickable(true);
+            t.setOnClickListener(new OnClickListener() { @Override public void onClick(View v) { if (l != null) l.onPage(dir); } });
+            Blocks.fast(t);
+            return t;
         }
 
         /** 点中间的页码（目录：输入第几条）。 */

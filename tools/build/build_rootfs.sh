@@ -108,12 +108,21 @@ pack() { # flavour product-dir
         # k49 heap defaults (512 MB class)
         sed -i 's/^on early-init$/on early-init\n    setprop dalvik.vm.heapsize 256m\n    setprop dalvik.vm.heapgrowthlimit 128m\n    setprop dalvik.vm.heapstartsize 4m/' "$ST/init.kindle.rc"
         printf '\n# PW5: 512 MB RAM; keep ART under the kernel/32-bit address-space limit\ndalvik.vm.heapstartsize=4m\ndalvik.vm.heapgrowthlimit=128m\ndalvik.vm.heapsize=256m\ndalvik.vm.heaptargetutilization=0.75\ndalvik.vm.heapminfree=512k\ndalvik.vm.heapmaxfree=8m\n' >> "$ST/system/build.prop"
+    elif [ "$1" = pw6 ]; then
+        # 1 GB class (PW6 / Scribe): prevent blocking-GC ANRs in heavy apps like Fanqie
+        grep -q '^dalvik\.vm\.heapstartsize=' "$ST/system/build.prop" || printf '\ndalvik.vm.heapstartsize=16m\ndalvik.vm.heapminfree=2m\ndalvik.vm.heapmaxfree=16m\ndalvik.vm.heaptargetutilization=0.75\n' >> "$ST/system/build.prop"
     fi
+    # Common e-ink image polish (from PW6 real-device & UX emulator audit): splash anti-black-screen + no StrictMode stalls + remove stray BT HAL/perm + strip dead system_server features (print/backup/device_admin/managed_users/voice_recognizers/bluetooth -> eliminates RemotePrintSpooler 10s TimeoutException & DevicePolicyManager KeyChainService crash)
+    rm -rf "$ST/system/app/Bluetooth" "$ST/system/lib/hw/bluetooth.default.so" "$ST/system/etc/permissions/android.hardware.bluetooth.xml"
+    if [ -f "$ST/system/etc/permissions/handheld_core_hardware.xml" ]; then
+        sed -i -E '/android\.(software\.(print|backup|device_admin|managed_users|voice_recognizers)|hardware\.bluetooth)"/d' "$ST/system/etc/permissions/handheld_core_hardware.xml"
+    fi
+    grep -q '^persist\.vd\.splash=' "$ST/system/build.prop" || printf '\npersist.vd.splash=1\npersist.sys.strictmode.disable=true\n' >> "$ST/system/build.prop"
     # what the images must have (the reasons for this rebuild)
-    for f in system/lib/libGLESv2_vdnull.so system/bin/vold system/bin/installd system/framework/services.jar system/priv-app/PackageInstaller/PackageInstaller.apk system/app/HTMLViewer/HTMLViewer.apk init.kindle.rc; do
+    for f in system/lib/libGLESv2_vdnull.so system/lib/libEGL.so system/bin/vold system/bin/installd system/framework/services.jar system/priv-app/PackageInstaller/PackageInstaller.apk system/app/HTMLViewer/HTMLViewer.apk init.kindle.rc; do
         [ -e "$ST/$f" ] || { echo "image $1 lacks $f" >&2; exit 1; }
     done
-    for f in system/app/Bluetooth system/app/CtsShimPrebuilt system/priv-app/CtsShimPrivPrebuilt system/app/WallpaperBackup system/priv-app/BackupRestoreConfirmation system/priv-app/Settings; do
+    for f in system/app/Bluetooth system/lib/hw/bluetooth.default.so system/etc/permissions/android.hardware.bluetooth.xml system/app/CtsShimPrebuilt system/priv-app/CtsShimPrivPrebuilt system/app/WallpaperBackup system/priv-app/BackupRestoreConfirmation system/priv-app/Settings; do
         [ -e "$ST/$f" ] && { echo "image $1 has $f (not wanted)" >&2; exit 1; }
     done
     grep -q 'VeraDroid: skipping non-whitelisted zygote fd' "$ST/system/lib/libandroid_runtime.so" || { echo "libandroid_runtime without the fd patch" >&2; exit 1; }

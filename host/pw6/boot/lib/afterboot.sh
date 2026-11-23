@@ -251,6 +251,7 @@ after_boot() {
         # Android was restarted while we waited: the new start has its own after_boot.
         [ -z "$P0" ] || [ "$P" = "$P0" ] || return 0
         # Do not run settings before boot_completed: every adb_sh is an nsenter+Android shell.
+        [ -f "$X/ctl/booted" ] && break
         [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" = 1 ] && break
         el=$(( $(cut -d. -f1 /proc/uptime) - t0 ))
         [ $el -ge 1800 ] && { t "after_boot: boot not completed after ${el}s"; return 0; }
@@ -268,8 +269,15 @@ after_boot() {
     cut -d. -f1 /proc/uptime > $W/booted     # compile.sh：开机完成一分钟后才开始后台预编译（看门狗）
     # 有些机型/模拟器上 epd 收不到 Android 首帧，splash_end 的 FULL 也可能落在 e-ink 尚未就绪时；
     # 开机完成后再强制一次整页 GC16，避免停在原生 Kindle/黑屏。
-    epd_send FULL
-    sleep 1
+    # 只在需要时补：splash_end 的整屏闪刷已经成功发出（显示桥日志里有一行 full=1 … -> 0）就不再闪第二次。以前每次开机都闪两次，
+    # 第二次（after_boot 每 2 秒才看一次开机完成）落在桌面刚画出来的时候：PW6 真机上两次整屏闪刷相隔约 1.2 秒，桌面要再等它刷完才稳定
+    # （perf/boot-flash，tools/bench 的 boot.home_settled）。
+    if grep -q 'full=1 .*-> 0 (' $W/epd.log 2>/dev/null; then
+        t "after_boot: the splash full refresh reached the panel, no second one"
+    else
+        epd_send FULL
+        sleep 1
+    fi
     # 下面这些都是写进 Android 数据库后就一直有效的设置（settings / pm disable）。每条命令都要起一个新的 JVM，
     # PW6 真机上一共约 10 秒 CPU，正好压在桌面刚出来的时候。每个版本只做一次；恢复出厂会清掉 data，标记跟着没了，自然重做。
     ABV=$(cat $SYS/version 2>/dev/null); ABM=$SYS/data/.vd-afterboot
@@ -284,8 +292,8 @@ after_boot() {
         # 下载后点开、文件管理器点 APK）都被软件包安装程序拦下：“出于安全考虑，您的手机已设置为禁止安装来源不明的应用”，
         # 点“设置”也没反应（用户说的“更新应用没权限”；一台 PW6 测试机上 0.94 实测，打开后同一个更新在安装程序里正常装上）。
         adb_sh 'settings put secure install_non_market_apps 1' >/dev/null 2>&1
-        # 用不到的后台服务：通知排序助手常驻约 37 MB
-        adb_sh 'pm disable-user --user 0 android.ext.services' >/dev/null 2>&1
+        # 用不到的后台服务：通知排序助手常驻约 37 MB；并关闭云备份与后台扫描省电（参考文石 Go 6 Gen 2）
+        adb_sh 'pm disable-user --user 0 android.ext.services; settings put secure backup_enabled 0; settings put global wifi_scan_always_enabled 0' >/dev/null 2>&1
         slim_after_boot
         if lowmem; then
             adb_sh 'for p in com.android.printspooler com.android.managedprovisioning com.android.companiondevicesupport com.android.bookmarkprovider com.android.providers.calendar com.android.calendar com.android.sharedstoragebackup com.android.camera2 com.android.gallery3d; do pm disable-user --user 0 $p >/dev/null 2>&1; done; settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; settings put global wifi_scan_always_enabled 0; setprop dalvik.vm.heapgrowthlimit 128m; setprop dalvik.vm.heapsize 192m' >/dev/null 2>&1 || true

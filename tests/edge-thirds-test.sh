@@ -11,8 +11,6 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 for h in $(ls -d host/*/ | sed 's|host/||; s|/||'); do
     S=host/$h/boot/lib/settings.sh A=host/$h/boot/action.sh
     [ -f $S ] && [ -f $A ] || continue
-    # host/legacy is the legacy line's own release (docs/legacy-line.md): checked only once it has the thirds keys
-    [ $h = legacy ] && ! grep -q 'G_EDGE_THIRDS' $S && continue
     for k in $KEYS; do
         grep -q "^    $k=" $S || fail "$S: no default for $k"
         [ "$(grep -c "for k in .* $k .*; do" $S)" -ge 2 ] || fail "$S: $k not in the publish / apply key lists"

@@ -548,12 +548,16 @@ final class Transfer {
         try {
             Drawable d = ctx.getPackageManager().getApplicationIcon(pkg);
             Bitmap bm = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(bm);
-            c.drawColor(0xFFFFFFFF);
-            d.setBounds(0, 0, 96, 96);
-            d.draw(c);
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            bm.compress(Bitmap.CompressFormat.PNG, 100, bo);
+            try {
+                Canvas c = new Canvas(bm);
+                c.drawColor(0xFFFFFFFF);
+                d.setBounds(0, 0, 96, 96);
+                d.draw(c);
+                bm.compress(Bitmap.CompressFormat.PNG, 100, bo);
+            } finally {
+                bm.recycle();
+            }
             send(out, 200, "image/png", bo.toByteArray(), "Cache-Control: max-age=60\r\n");
         } catch (Exception e) {
             send(out, 404, "text/plain", "no icon".getBytes("UTF-8"), null);

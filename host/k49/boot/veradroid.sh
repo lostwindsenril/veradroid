@@ -28,8 +28,9 @@ mkdir -p $SYS $W
 # 解冻（Android 冻着、还活着）时不删：显示桥一直在跑，手里还是那个应用的参数（比如微信读书的 KFB_MODE=1 / FLASH=6）。以前这里删了，
 # 解冻后打开桌面时 appprof_fg 比较“新 = 全局、旧 = 空”判成“same as before”，不发 SET，桌面就一直用微信读书的灰度最准刷新
 # （每次局部刷新都是 GC16、每 6 页闪一次；Scribe 用户诊断 1.04：“卡顿不跟手”）。冷启动在下面另外删。
-if ! { [ -f $W/frozen ] && kill -0 "$(cat $W/pid 2>/dev/null)" 2>/dev/null; }; then rm -f $SYS/settings.app $W/appprof.pkg; fi
+_p=$(cat $W/pid 2>/dev/null); if ! { [ -f $W/frozen ] && [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; }; then rm -f $SYS/settings.app $W/appprof.pkg; fi
 settings_load
+perf_mark "libs loaded (${1:-}, pid $$${VERADROID_DETACHED:+, detached})"
 
 # 第二阶段：在新命名空间里
 if [ "$1" = "--in-ns" ]; then run_in_ns "$2" "$3" "$4"; exit 1; fi
@@ -158,6 +159,7 @@ start_helpers() {
 type launcher_restore >/dev/null 2>&1 && launcher_restore
 type vd_where_notes >/dev/null 2>&1 && vd_where_notes
 
+perf_mark "start checks done"
 P=$(cat $W/pid 2>/dev/null)
 # 社区（KPW6 KUAL 越狱）：“不时出 bug 之后点启动就进不去系统，只能用更新脚本进”。更新脚本能进是因为它先完整 stop.sh、再冷启动；
 # 而“启动”看到 Android 还在（冻着或在跑）就只解冻 / 打开应用——那个 Android 要是已经坏了（system_server / surfaceflinger 没了、
@@ -199,20 +201,31 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         echo $$ > $W/thawing/pid
         trap 'rm -f $W/thawing/pid; rmdir $W/thawing 2>/dev/null' EXIT
         t "thaw requested"
-        framework_stop
-        # Kindle 画面停着的时候先给个提示，避免看起来像卡死
-        splash "正在恢复" 40
         # 冻结期间积压的触摸丢掉；解冻后让容器整屏重画
         touch $X/ctl/sleep
+        framework_stop
         input_grab
         android_thaw
         # 显示桥 / 触摸前端每次开机最多自动重启 3 次（watchdog.sh）：开着几天的 Android 用完了次数，屏幕就永远停住。解冻时重新计数，
         # 显示桥没了马上拉起来（不等看门狗的下一轮）
         rm -f $W/epd.restarts $W/input.restarts
         [ -x "$VD/bin/veradroid-epd" ] && ! alive $W/epd.pid && { t "thaw: display bridge was gone, starting it"; display_start; }
+        perf_mark "thaw: android thawed"
         type lock_reset_check >/dev/null 2>&1 && lock_reset_check
         rm -f $W/frozen
-        ( sleep 1; rm -f $X/ctl/sleep; epd_send REDRAW ) &
+        # 解冻以后尽快整屏闪刷一次。以前：先用 fbink 画一屏“正在恢复”（整屏清屏 + 文字），固定 1 秒后再整屏重画 Android：
+        # 两次整屏刷新，第一次刷新和固定的 1 秒都算在“再进 Android”里（perf/thaw，tools/bench 的 thaw.first_refresh）。
+        # 要打开的是桌面、冻结前前台却是别的应用（看书时回的 Kindle）：先让桌面到前台，等它报到再放开（桌面 onResume 马上发
+        # "fg home"，宿主的命令监听写 $W/appprof.pkg；任务栈通知写的 $X/fg 有时晚好几秒，两个哪个先到都算；最多 1.5 秒），
+        # 不先闪一下上次那个应用的画面；前台本来就是桌面（或要开的是某个应用）就马上放开（共享缓冲 $X/fb 里就是冻结前的最后一帧）。
+        # 闪刷（FULL）而不是 REDRAW：直接从 Kindle 的书库换到 Android 的画面，不闪会留残影（以前由“正在恢复”那一屏的清屏顶着）。
+        if [ "$APP" = home ] && [ "$(head -n 1 $X/fg 2>/dev/null)" != com.veradroid.home ]; then
+            open_app; THAW_OPENED=1
+            i=0; while [ $i -lt 30 ] && [ "$(cat $W/appprof.pkg 2>/dev/null)" != home ] && [ "$(head -n 1 $X/fg 2>/dev/null)" != com.veradroid.home ]; do usleep 50000; i=$((i + 1)); done
+            usleep 150000      # 报到（onResume）以后桌面这一帧还要画出来
+            perf_mark "thaw: desktop in front after $((i * 50 + 150)) ms"
+        fi
+        rm -f $X/ctl/sleep; ( epd_send FULL || { sleep 1; epd_send FULL; } ) &
         start_helpers
         # 冻结期间 Kindle 上改了时区 / 12、24 小时制：告诉 Android（tz.sh，没变就什么都不做）
         ( sleep 3; tz_sync_live; time_format_apply ) </dev/null >>$LOG 2>&1 &
@@ -230,7 +243,7 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         storage_mount; log_reopen
         t "restart after inconsistent state: stopped, starting again"
     else
-    open_app
+    [ -n "$THAW_OPENED" ] || open_app
     vd_slog "android already running (pid $P): opened $APP"
     exit 0
     fi
@@ -257,10 +270,12 @@ fi
 # 装好后用新版本的脚本接着启动。只看文件名的检查很快；没有包时什么都不做。装过一次（成功或失败）的包会被删掉 / 改名，不会每次重试。
 if [ -z "$VD_LOCALUPD" ] && ls "$VD"/update/veradroid-*-*.tar.gz "$VD"/update/VeraDroid-Offline*.zip >/dev/null 2>&1; then
     export VD_LOCALUPD=1
+    exec >>/tmp/veradroid-stop.log 2>&1
     if cp "$VD/boot/lib/localupdate.sh" $W/localupdate.sh 2>/dev/null && ( cd / && sh $W/localupdate.sh install ) </dev/null; then
         t "local update installed, restarting with the new version"
         exec sh "$VD/boot/veradroid.sh" "$@"
     fi
+    storage_mount; log_reopen
 fi
 if ! mkdir $W/starting 2>/dev/null; then
     op=$(cat $W/starting/pid 2>/dev/null)
@@ -329,7 +344,7 @@ start_helpers
 # Whole-image auto updater (opt out with /mnt/base-us/veradroid/autoupdate = 0)
 # 自动更新常驻（每 6 小时看一次）。从 tmpfs 里的副本运行、cwd 为 /：sh 会一直开着脚本文件，
 # 直接跑 $VD 里的那份会让 /mnt/base-us 在关机时卸不掉（EBUSY），哪怕 VeraDroid 早就停了。
-[ -x "$VD/boot/lib/auto-update.sh" ] && cp "$VD/boot/lib/auto-update.sh" $W/auto-update.sh 2>/dev/null && ( cd / && exec setsid sh $W/auto-update.sh ) </dev/null >/dev/null 2>&1 &
+[ -x "$VD/boot/lib/auto-update.sh" ] && cp "$VD/boot/lib/auto-update.sh" "$W/auto-update.sh.tmp" 2>/dev/null && mv -f "$W/auto-update.sh.tmp" "$W/auto-update.sh" && ( cd / && exec setsid sh $W/auto-update.sh ) </dev/null >/dev/null 2>&1 &
 after_boot &
 t "started"
 vd_slog "started (container up, android booting)"

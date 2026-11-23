@@ -3,12 +3,10 @@
 # home / IME kept out of swap, timed background stop. Same file in the three hosts, wired into boot / watchdog / fg / stop.
 cd "$(dirname "$0")/.." || exit 2
 fail() { echo "FAIL: $*"; exit 1; }
-# host/legacy is the legacy line's own release (docs/legacy-line.md): it is checked only once it carries this change.
-HL=; [ -f host/legacy/boot/lib/memkeep.sh ] && HL=legacy
-for h in k49 $HL; do
+for h in k49 legacy; do
     cmp -s host/pw6/boot/lib/memkeep.sh host/$h/boot/lib/memkeep.sh || fail "host/$h/boot/lib/memkeep.sh differs from host/pw6"
 done
-for h in pw6 k49 $HL; do
+for h in pw6 k49 legacy; do
     b=host/$h/boot
     sh -n $b/lib/memkeep.sh || fail "syntax $b/lib/memkeep.sh"
     grep -q '^for m in settings memory memkeep ' $b/veradroid.sh || fail "$b/veradroid.sh does not source memkeep.sh"
@@ -20,9 +18,10 @@ for h in pw6 k49 $HL; do
     grep -q '^    WIFI_IDLE_OFF_MIN=0 ' $b/lib/settings.sh || fail "$h: Wi-Fi idle off must default to off"
     grep -q 'appprof_oec_publish' $b/lib/appprof.sh && grep -q '^appknobs_join()' $b/lib/appprof.sh || fail "$h appprof_publish does not join appknobs.d"
     grep -q 'mem_fg "\$ap_pkg"' $b/lib/appprof.sh || fail "$h appprof_fg does not report fg to memkeep"
-    for k in ZRAM_EXTRA LMK_MINFREE MEM_KEEP MEM_KEEP_APPS BG_STOP_MIN BG_STOP_APPS BOOT_BLOCK BOOT_ALLOW WIFI_IDLE_OFF_MIN WIFI_IDLE_BPS; do
+    for k in ZRAM_EXTRA LMK_MINFREE MEM_KEEP MEM_KEEP_APPS BG_FREEZE BG_STOP_MIN BG_STOP_APPS BOOT_BLOCK BOOT_ALLOW WIFI_IDLE_OFF_MIN WIFI_IDLE_BPS; do
         grep -q "^    $k=" $b/lib/settings.sh || fail "$h settings.sh has no default for $k"
     done
+    grep -q '^    BG_FREEZE=1 ' $b/lib/settings.sh || fail "$h: instant background freeze must default to on"
     grep -q '^    BG_STOP_MIN=0 ' $b/lib/settings.sh || fail "$h: timed background stop must default to off"
 done
 for h in pw6 k49; do
@@ -114,6 +113,16 @@ out2=$(W=$T/w X=$T/x SYS=$T/sys D=$T/dump sh -c '
     BOOT_BLOCK=1; boot_block_apply; echo "S $(tr "\n" "," < $SYS/bootblock.list)"
     : > $W/pm; boot_block_apply; echo "T $(wc -l < $SYS/bootblock.list | tr -d " ")"
     BOOT_BLOCK=0; : > $W/pm; boot_block_apply; echo "U $(tr "\n" "," < $W/pm) $([ -f $SYS/bootblock.list ] && echo kept || echo gone)"
+    rm -f $W/memfg.* $W/sig; date() { echo 500; }
+    bg_pkg_pids() { case "$1" in com.keep) echo 101 ;; com.five) echo "201 202" ;; com.other) echo 301 ;; esac; }
+    kill() { echo "KILL $*" >> $W/sig; }
+    BG_FREEZE=1; mem_fg com.keep; mem_fg com.five; mem_fg com.other
+    bg_freeze_sweep
+    echo "V $(tr "\n" ";" < $W/sig) | $(tr "\n" "," < $W/memfg.frozen)"
+    : > $W/sig; mem_fg com.five; bg_freeze_sweep
+    echo "W $(tr "\n" ";" < $W/sig) | $(tr "\n" "," < $W/memfg.frozen)"
+    : > $W/sig; bg_thaw_all
+    echo "X $(tr "\n" ";" < $W/sig) | $([ -f $W/memfg.frozen ] && echo kept || echo gone)"
 ' 2>&1)
 expect2() { printf '%s\n' "$out2" | grep -qxF "$1" || fail "expected '$1' in:
 $out2"; }
@@ -125,4 +134,7 @@ expect2 "R com.android.providers.media/.MediaScannerReceiver,com.douban.book.rea
 expect2 "S com.tipsoon.android/.Boot,"
 expect2 "T 1"
 expect2 "U pm enable com.tipsoon.android/.Boot, gone"
+expect2 "V KILL -STOP 201 202; | com.five,"
+expect2 "W KILL -CONT 201 202;KILL -STOP 301; | com.other,"
+expect2 "X KILL -CONT 301; | gone"
 echo "memkeep-test: ok"

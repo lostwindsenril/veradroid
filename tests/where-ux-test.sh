@@ -21,7 +21,7 @@ LEG=; grep -q '^vd_launch_backup()' cloud/static/bootstrap-legacy.sh 2>/dev/null
 [ "$(title cloud/static/VeraDroid.sh)" = "VeraDroid 安装（在线）" ] || F "VeraDroid.sh title: $(title cloud/static/VeraDroid.sh)"
 [ "$(title cloud/static/VeraDroid-Offline.sh)" = "VeraDroid 安装（离线）" ] || F "VeraDroid-Offline.sh title"
 [ "$(title cloud/static/VeraDroid-Experimental.sh)" = "VeraDroid 安装（在线，实验机型）" ] || F "VeraDroid-Experimental.sh title"
-[ ! -f cloud/static/VeraDroid-Legacy.sh ] || [ -z "$LEG" ] || [ "$(title cloud/static/VeraDroid-Legacy.sh)" = "VeraDroid 安装（在线，老机型）" ] || F "VeraDroid-Legacy.sh title"
+[ ! -f cloud/static/VeraDroid-Legacy.sh ] || [ "$(title cloud/static/VeraDroid-Legacy.sh)" = "VeraDroid 安装（在线，老机型）" ] || F "VeraDroid-Legacy.sh title"
 for f in cloud/static/VeraDroid-Launch.sh host/*/VeraDroid-Launch.sh; do
     case "$f" in host/legacy/*) [ -n "$LEG" ] || continue ;; host/*) [ -n "$NEWF" ] || continue ;; esac   # old copy in the other family's tree
     [ "$(title "$f")" = "VeraDroid 启动" ] || F "$f title: $(title "$f")"

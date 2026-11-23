@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.veradroid.home"
-    android:versionCode="93"
-    android:versionName="0.36.2">
+    android:versionCode="99"
+    android:versionName="1.09">
     <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="25" />
     <uses-permission android:name="android.permission.MANAGE_ACTIVITY_STACKS" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -173,6 +173,18 @@
                 <data android:scheme="package" />
             </intent-filter>
         </activity>
+        <!-- 第三方输入法（讯飞、搜狗、同文、微信等）引导页“启用输入法”发的 INPUT_METHOD_SETTINGS：系统里没有“设置”应用，由这一页接住。 -->
+        <activity
+            android:name=".ImeSettingsActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            <intent-filter>
+                <action android:name="android.settings.INPUT_METHOD_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".BluetoothActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
@@ -211,13 +223,24 @@
             android:taskAffinity="com.veradroid.home.switcher"
             android:screenOrientation="nosensor"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
-        <!-- feat/parity-gaps：显示与刷新 / 系统与性能、锁屏密码、屏保挑选 -->
+        <!-- feat/parity-gaps：显示与刷新 / 系统与性能、锁屏密码、屏保挑选；同时兜底 android.settings.SETTINGS 等常见系统设置意图（修复用户诊断 中 Legado 跳系统设置闪退） -->
         <activity
             android:name=".HostSettingsActivity"
+            android:exported="true"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            <intent-filter>
+                <action android:name="android.settings.SETTINGS" />
+                <action android:name="android.settings.DISPLAY_SETTINGS" />
+                <action android:name="android.settings.APPLICATION_SETTINGS" />
+                <action android:name="android.settings.MANAGE_APPLICATIONS_SETTINGS" />
+                <action android:name="android.settings.DATE_SETTINGS" />
+                <action android:name="android.settings.LOCALE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".LockSettingsActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"

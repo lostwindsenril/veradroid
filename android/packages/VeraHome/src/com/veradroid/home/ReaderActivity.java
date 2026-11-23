@@ -89,6 +89,7 @@ public class ReaderActivity extends Activity {
     private Bitmap pdfBitmap;
     private volatile int pdfGen;
     private volatile boolean gone;   // onDestroy 之后：排队的 PDF 活不再做
+    private volatile boolean destroyed;
     private final java.util.concurrent.ExecutorService pdfWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler();
     private long readStarted;
@@ -227,12 +228,14 @@ public class ReaderActivity extends Activity {
         bottomBox.setVisibility(View.GONE);
         pageView.addView(bottomBox, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
 
+        availH = prefs().getInt(availHKey(), 0);
         content.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
                 int hh = b - t;
                 if (hh <= 0 || hh == (availH > 0 ? availH : getResources().getDisplayMetrics().heightPixels)) return;
                 android.util.Log.i("VeraHome", "reader: text area " + hh + " px, screen " + getResources().getDisplayMetrics().heightPixels);
                 availH = hh;
+                prefs().edit().putInt(availHKey(), hh).apply();
                 if (!pages.isEmpty()) v.post(new Runnable() { @Override public void run() { rebuildKeepPosition(); } });
             }
         });
@@ -291,6 +294,11 @@ public class ReaderActivity extends Activity {
     /** 分页用的画笔、宽、高：主线程上取好，后台线程只读。 */
     private static final class Geometry {
         android.text.TextPaint tp; int w, h; android.text.Layout.Alignment al; String sig; int indentPx, paraPx;
+    }
+
+    private String availHKey() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        return "availH_" + dm.widthPixels + "x" + dm.heightPixels;
     }
 
     private Geometry geometry() {
@@ -390,16 +398,18 @@ public class ReaderActivity extends Activity {
                             showFirst(fc, fi, start, end, same ? savedPg : -1, same ? savedTotal : 0, same ? savedLeft : "");
                         } });
                     }
+                    if (destroyed) return;
                     if (all == null) {
                         Epub.Book b = loadBook(f); all = b.chapters; bookToc = b.toc;
                         if (!b.chapters.isEmpty()) Epub.saveCache(b, tocCache(f));
                     }
+                    if (destroyed) return;
                     if (all.isEmpty()) throw new Exception("EPUB 里没有可读的章节");
                     final List<Chapter> chs = all;
                     final List<Epub.TocItem> tc = bookToc;
                     // 分页前：目录换成整本读出来的那份，翻页 / 跳章先用读进来的章节（大书分页要几十秒）
                     ui.post(new Runnable() { @Override public void run() {
-                        if (isDestroyed()) return;
+                        if (destroyed || isDestroyed()) return;
                         preChapters = chs;
                         provBookReady();
                         if (tc != null) { toc.clear(); toc.addAll(tc); tocEntries = null; }
@@ -408,9 +418,11 @@ public class ReaderActivity extends Activity {
                     final List<Integer> starts = new ArrayList<Integer>();
                     long tp0 = SystemClock.uptimeMillis();
                     paginate(chs, g, pg, starts);
+                    if (destroyed) return;
                     android.util.Log.i("VeraPerf", "reader whole book: " + pg.size() + " pages in " + (SystemClock.uptimeMillis() - tp0) + " ms (background)");
-                    ui.post(new Runnable() { @Override public void run() { if (tc != null) { toc.clear(); toc.addAll(tc); } installPages(chs, pg, starts, g.sig); } });
+                    ui.post(new Runnable() { @Override public void run() { if (destroyed || isDestroyed()) return; if (tc != null) { toc.clear(); toc.addAll(tc); } installPages(chs, pg, starts, g.sig); } });
                 } catch (Throwable t) {
+                    if (destroyed) return;
                     final String msg = String.valueOf(t.getMessage());
                     ui.post(new Runnable() {
                         @Override public void run() {
@@ -1164,10 +1176,12 @@ public class ReaderActivity extends Activity {
     /** 整本分页（后台线程也能调：只读 chs 和 g）。 */
     private void paginate(List<Chapter> chs, Geometry g, List<Page> out, List<Integer> starts) {
         for (int ci = 0; ci < chs.size(); ci++) {
+            if (destroyed) return;
             String s = chs.get(ci).text;
             int i = 0;
             starts.add(out.size());
             while (i < s.length()) {
+                if (destroyed) return;
                 i = skipBreaks(s, i);
                 if (i >= s.length()) break;
                 int end = pageEnd(s, i, g);
@@ -1498,8 +1512,10 @@ public class ReaderActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        destroyed = true;
         pdfGen++;
         gone = true;
+        ui.removeCallbacksAndMessages(null);
         // 关文档也排在 PDF 线程上：等正在渲染的那一页画完再关。以前这里最多等 2 秒就关，大 PDF 一页要画 4 秒多，
         // close() 因为页面还开着失败，文档留给 finalize 去关；finalize 又要等全局的 PDF 锁，超过 10 秒整个桌面进程被杀（实测连开 4 次就崩）。
         try {
@@ -1774,13 +1790,15 @@ public class ReaderActivity extends Activity {
         final int gen = ++rebuildGen;
         new Thread(new Runnable() {
             @Override public void run() {
+                if (destroyed) return;
                 final List<Page> pg = new ArrayList<Page>();
                 final List<Integer> starts = new ArrayList<Integer>();
                 long t0 = SystemClock.uptimeMillis();
                 try { paginate(chs, g, pg, starts); } catch (Throwable t) { android.util.Log.w("VeraHome", "reader: repaginate failed", t); }
+                if (destroyed) return;
                 android.util.Log.i("VeraPerf", "reader repaginate: " + pg.size() + " pages in " + (SystemClock.uptimeMillis() - t0) + " ms (background)");
                 ui.post(new Runnable() { @Override public void run() {
-                    if (gen != rebuildGen || isDestroyed() || !pages.isEmpty()) return;
+                    if (destroyed || gen != rebuildGen || isDestroyed() || !pages.isEmpty()) return;
                     installPages(chs, pg, starts, g.sig);
                 } });
             }
@@ -2290,7 +2308,7 @@ public class ReaderActivity extends Activity {
         sm.setOrientation(LinearLayout.VERTICAL);
         sm.setPadding(0, dp(4), 0, dp(6));
         sm.addView(Blocks.titled(this, "Refresh mode", "刷新档位（全局）", 16, true));
-        sm.addView(new Blocks.SegBar(this, BlocksSettings.SMOOTH_L, Math.max(0, Math.min(3, HostLink.num(cfg, "KFB_SMOOTH", 0))), new Blocks.SegBar.Listener() {
+        sm.addView(new Blocks.SegBar(this, BlocksSettings.SMOOTH_L, Math.max(0, Math.min(BlocksSettings.SMOOTH_L.length - 1, HostLink.num(cfg, "KFB_SMOOTH", 0))), new Blocks.SegBar.Listener() {
             @Override public void onPick(int i) { HostLink.settings("KFB_SMOOTH=" + i + "\n"); } }), Blocks.gap(this, 4));
         sheetBox.addView(sm, Blocks.match());
         int fi = 4;

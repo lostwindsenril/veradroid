@@ -198,7 +198,7 @@ final class Panel {
     /** 高度固定为半屏多一点：换到“显示”“更多”时面板不变大变小。 */
     private WindowManager.LayoutParams params() {
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, (int) (ctx.getResources().getDisplayMetrics().heightPixels * 0.52),
+            ViewGroup.LayoutParams.MATCH_PARENT, (int) (ctx.getResources().getDisplayMetrics().heightPixels * 0.56),
             WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,      // 比状态栏那条（TYPE_PHONE）高一层，盖在它上面，不用先把它撤掉
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE);
@@ -492,6 +492,15 @@ final class Panel {
         warmRow = (View) warm.getParent();
 
         p.addView(new View(ctx), new LinearLayout.LayoutParams(1, 0, 1));
+        LinearLayout go = row();
+        go.setPadding(0, dp(4), 0, dp(8));
+        addCell(go, bigButton("回到桌面", new View.OnClickListener() {
+            @Override public void onClick(View v) { openHome(false); }
+        }));
+        addCell(go, bigButton("回到 Kindle", new View.OnClickListener() {
+            @Override public void onClick(View v) { HostLink.cmd("exit"); finish(); }
+        }));
+        p.addView(go);
         p.addView(Ui.rule(ctx, 1, Color.BLACK));
         p.addView(nav("显示", "刷新方式、对比度、翻页动画、字号", new View.OnClickListener() {
             @Override public void onClick(View v) { show(P_DISPLAY); }
@@ -550,10 +559,10 @@ final class Panel {
     }
 
     private void openHome(boolean settings) {
+        finish();
         Intent i = HomeActivity.homeIntent(ctx);
         if (settings) i.putExtra("settings", true);
         startActivity(i);
-        finish();
     }
 
     /** 蓝牙归 Kindle 管（Android 里没有蓝牙服务）。点一下只是开关（和 Wi-Fi 方块一样，用户反馈 PW6 1.01：点了进设置页不符合直觉），

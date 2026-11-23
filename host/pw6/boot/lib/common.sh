@@ -129,6 +129,7 @@ storage_umount() {
     dev=$(awk -v m="$SYS" '$2==m {print $1}' /proc/mounts | tail -1)
     [ -n "$dev" ] || {
         # Detach any loop still tied to the system image even if mount gone
+        for l in $(img_loops); do losetup -d "$(loop_dev "$l")" 2>/dev/null || true; done
         return 0
     }
     # 刚杀掉的容器进程、延迟卸载（umount -l）的挂载要过一会儿才真正放手：立刻 umount 会报 busy，
@@ -184,6 +185,8 @@ done
 [ -f "$VD/boot/lib/progress.sh" ] && . "$VD/boot/lib/progress.sh"
 
 t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*"; }
+# 计时点（tools/bench/vdbench.sh 跑的时候才有 /dev/shm/vdperf；平时只是一次 [ -f ]，什么都不写）
+perf_mark() { [ -f /dev/shm/vdperf ] && t "perf: $*"; return 0; }
 # Wi-Fi 开关只动 Wi-Fi。以前用的 com.lab126.cmd wirelessEnable 是 Kindle 的“飞行模式”：关它连蓝牙也关了，开它又把蓝牙打开
 # （KPW6 用户报告）。com.lab126.wifid enable 写得进去但不起作用（一台测试机 5.19.5：仍然连着）。起作用的是 cmd 的哈希属性
 # disableInterfaces（{ wan = (0), wifi = (1) } = 关掉 Wi-Fi 接口；输入格式里整数要带括号）：测试机实测 Wi-Fi 断开（wifid enable 跟着变 0、
@@ -204,7 +207,7 @@ wifi_set() { # 0|1
         [ "$1" = 1 ] && [ "$(lipc-get-prop com.lab126.cmd wirelessEnable 2>/dev/null)" = 0 ] && lipc-set-prop -i com.lab126.cmd wirelessEnable 1
     else lipc-set-prop -i com.lab126.cmd wirelessEnable "$1"; fi
 }
-alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
+alive() { [ -f "$1" ] || return 1; _ap=$(cat "$1" 2>/dev/null); [ -n "$_ap" ] && kill -0 "$_ap" 2>/dev/null; }
 # 给显示桥发命令。显示桥不在了就不写：往没有读端的 FIFO 里 echo 会永远卡在 open()，
 # 命令监听、看门狗、唤醒流程以前都可能这样被拖死（显示桥崩过：tmpfs 写满时 SIGBUS）。
 # 给会卡住的命令加时限：timeout <秒> 命令...。busybox 1.30 以前的写法是 timeout -t <秒>；两种都不认就不限时。

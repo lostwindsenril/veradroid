@@ -20,7 +20,7 @@ grep -q '\[ $((now - cu)) -ge 10 \] && \[ $((now - cu)) -le 120 \]' $LG || fail 
 grep -q 'BS_URL="$BASE/static/bootstrap-legacy.sh"' $LG || fail "Legacy.sh: emulator-only models not routed to the legacy installer"
 grep -q '^test_begin$' $L/veradroid.sh || fail "veradroid.sh: no test watcher"
 grep -q 'test_after_stop "$uc_line"' $L/stop.sh || fail "stop.sh: no return-to-Kindle record"
-{ grep -q 'nk" != "$(cat "$VD/kmod.id"' $L/lib/auto-update.sh || { grep -q '\[ "$nk" = "$(cat "$VD/kmod.id" 2>/dev/null)" \] && kok=1' $L/lib/auto-update.sh && grep -q 'if \[ -z "$kok" \]; then' $L/lib/auto-update.sh; }; } || fail "auto-update: kernel-module changes installed silently"
+grep -q 'nk" != "$(cat "$VD/kmod.id"' $L/lib/auto-update.sh || fail "auto-update: kernel-module changes installed silently"
 grep -q 'KLIB_SKIP=1' $L/lib/container.sh || fail "container: Kindle library bound into Android on emulator-only models"
 # redaction: no book names / personal paths survive
 T=$(mktemp -d); trap 'rm -rf $T' EXIT

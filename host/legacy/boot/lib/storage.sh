@@ -49,7 +49,8 @@ st_fs_kb() {
     magic=$(dd if="$SYSTEM_IMG" bs=1 skip=1080 count=2 2>/dev/null | od -An -tu2 2>/dev/null | tr -d ' \n')
     [ "$magic" = 61267 ] || return 1                     # 0xEF53
     b=$(st_sb 4); l=$(st_sb 24)
-    st_num "$b" || [ ${#b} -le 10 ] || return 1
+    case "$b" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#b}" -le 10 ] || return 1
     case "$l" in 0|1|2|3|4|5|6) ;; *) return 1 ;; esac
     awk -v b="$b" -v l="$l" 'BEGIN { printf "%d", b * (2 ^ l) }'
 }

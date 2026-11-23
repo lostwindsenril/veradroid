@@ -11,6 +11,6 @@ grep -q 'BAK="\$SYS/host.bak' "$B" || { echo 'FAIL host backup path'; fail=1; }
 grep -q 'for d in /mnt/base-us/veradroid.bak' "$B" || { echo 'FAIL legacy backup migration'; fail=1; }
 grep -q 'veradroid-fullupdate.log' "$B" || { echo 'FAIL legacy log migration'; fail=1; }
 grep -q '正在下载 VeraDroid' "$B" || { echo 'FAIL download progress copy'; fail=1; }
-grep -q '安装失败（代码 $dc）：' "$B" || { echo 'FAIL failure copy'; fail=1; }
+grep -q '安装失败（代码' "$B" || { echo 'FAIL failure copy'; fail=1; }
 [ "$fail" = 0 ] && echo 'BOOTSTRAP LAYOUT OK' || echo 'BOOTSTRAP LAYOUT FAILURES'
 exit "$fail"

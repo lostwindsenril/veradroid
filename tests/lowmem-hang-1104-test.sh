@@ -39,8 +39,6 @@ done
 for h in pw6 k49; do awk '/^heap_fix\(\)/,/^}/' host/$h/boot/lib/memory.sh | grep -q '_prop pm.dexopt.first-boot verify-at-runtime' || fail "a: $h heap_fix first-boot filter"; done
 # b
 for h in pw6 k49 legacy; do
-    # combined tree: host/legacy is the legacy line's own release (docs/legacy-line.md); checked once it has the change
-    [ $h = legacy ] && ! grep -qs '"2048:0 3072:100 4096:200 8192:300 14336:900 16384:906"' host/legacy/boot/lib/memkeep.sh && { echo "  note: host/legacy has no 512 MB lmkd table yet - skipped"; continue; }
     grep -q '"2048:0 3072:100 4096:200 8192:300 14336:900 16384:906"' host/$h/boot/lib/memkeep.sh || fail "b: $h lmkd table"
     grep -q 'echo 2048,3072,4096,8192,14336,16384 > "$mf"' host/$h/boot/lib/memory.sh || fail "b: $h kernel minfree"
 done

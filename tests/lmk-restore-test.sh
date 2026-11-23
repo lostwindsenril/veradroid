@@ -7,8 +7,6 @@ fail() { echo "FAIL: $*"; exit 1; }
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT
 for h in pw6 k49 legacy; do
-    # combined tree: host/legacy is the legacy line's own release (docs/legacy-line.md); checked once it has the change
-    [ $h = legacy ] && ! grep -q '^lmk_kernel_restore()' host/legacy/boot/lib/memory.sh && { echo "  note: host/legacy has no lmk_kernel_restore yet - skipped"; continue; }
     b=host/$h/boot
     sh -n $b/lib/memory.sh || fail "syntax $b/lib/memory.sh"
     sh -n $b/stop.sh || fail "syntax $b/stop.sh"

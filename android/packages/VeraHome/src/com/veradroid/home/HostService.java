@@ -191,6 +191,9 @@ public class HostService extends Service {
     }
 
     @Override public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        if (noticeDialog != null) { try { if (noticeDialog.isShowing()) noticeDialog.dismiss(); } catch (Throwable ignored) { } noticeDialog = null; noticeText = null; }
+        if (usbDialog != null) { try { if (usbDialog.isShowing()) usbDialog.dismiss(); } catch (Throwable ignored) { } usbDialog = null; }
         try { unregisterReceiver(panelCloser); } catch (Throwable ignored) { }
         try { if (animObserver != null) getContentResolver().unregisterContentObserver(animObserver); } catch (Throwable ignored) { }
         if (observer != null) CtlWatch.remove(observer);

@@ -9,7 +9,11 @@ net_setup() {
     # DNS：ANDROID_DNS 在前，Kindle 当前的在后。只在 slirp 自己的 mount 命名空间里 bind，不动 Kindle 的 /etc
     { for d in $ANDROID_DNS; do echo "nameserver $d"; done
       grep '^nameserver' "$(readlink -f /etc/resolv.conf)" 2>/dev/null; } > $W/resolv.conf
-    # Wi-Fi 省电模式保持开着（电池优先）：以前这里会关掉它，空闲耗电明显更高
+    # 运行启动时若未强制始终省电，先关闭 Wi-Fi 省电避免首启/加载页面卡顿（空闲 2 分钟或休眠自动恢复省电）
+    if [ "${WIFI_PS:-auto}" != on ]; then
+        cut -d. -f1 /proc/uptime > $W/wifi.busy 2>/dev/null || true
+        wifi_ps_off
+    fi
 }
 
 # Wi-Fi 省电。设置 WIFI_PS：
@@ -47,13 +51,15 @@ wifi_ps_tick() {
         *)
             d=$(wifi_dev); now=$(cut -d. -f1 /proc/uptime)
             rx=$(cat /sys/class/net/$d/statistics/rx_bytes 2>/dev/null || echo 0)
-            set -- $(cat $W/wifi.rx 2>/dev/null); prx=${2:-$rx}; pt=${1:-$now}
-            echo "$now $rx" > $W/wifi.rx
+            tx=$(cat /sys/class/net/$d/statistics/tx_bytes 2>/dev/null || echo 0)
+            tot=$((rx + tx))
+            set -- $(cat $W/wifi.rx 2>/dev/null); prx=${2:-$tot}; pt=${1:-$now}
+            echo "$now $tot" > $W/wifi.rx
             busy=
             [ -f $W/fwd.id ] && busy=fwd                                  # 传书网页开着
-            dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (rx - prx) / dt )) -ge ${WIFI_BUSY_BPS:-32768} ] && busy=rx   # ≥ 32 KB/s
+            dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (tot - prx) / dt )) -ge ${WIFI_BUSY_BPS:-2048} ] && busy=rx   # ≥ 2 KB/s 即判定在联网交互，立刻唤醒 Wi-Fi 降延迟
             if [ -n "$busy" ]; then echo $now > $W/wifi.busy; wifi_ps_off
-            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 60 ]; then wifi_ps_restore
+            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 120 ]; then wifi_ps_restore
             fi ;;
     esac
 }
@@ -104,7 +110,8 @@ net_start() {
         { [ -e '$target' ] && mount --bind $W/resolv.conf '$target'; true; } &&
         exec $SLIRP --mtu=1500 --cidr=$NET.0/24 $CONF --api-socket $W/slirp.sock $P eth0" > $W/slirp.log 2>&1 &
     echo $! > $W/slirp.pid
-    i=0; while [ $i -lt 20 ] && ! grep -q 'sent tapfd' $W/slirp.log 2>/dev/null; do usleep 500000; i=$((i + 1)); done
+    # 每 0.1 秒看一次（以前 0.5 秒：平均白等 0.25 秒），最多仍是 10 秒
+    i=0; while [ $i -lt 100 ] && ! grep -q 'sent tapfd' $W/slirp.log 2>/dev/null; do usleep 100000; i=$((i + 1)); done
     t "net: slirp4netns $(grep -q 'sent tapfd' $W/slirp.log && echo up || echo 'NOT up'): $(tail -1 $W/slirp.log)"
 }
 

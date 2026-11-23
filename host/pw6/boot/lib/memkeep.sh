@@ -106,12 +106,63 @@ mem_keep_tick() {
     done
     return 0
 }
-# 停止时：cgroup 删掉（Android 的进程都已经退出，空的才删得掉）
-mem_keep_off() { [ -d $MEMKEEP_CG ] && rmdir $MEMKEEP_CG 2>/dev/null; return 0; }
+# 停止时：先解冻所有被冻结的后台应用，再删掉 cgroup（Android 的进程都已经退出，空的才删得掉）
+mem_keep_off() { bg_thaw_all; [ -d $MEMKEEP_CG ] && rmdir $MEMKEEP_CG 2>/dev/null; return 0; }
 
-# 前台变了：上一个应用记下离开的时间（BG_STOP 用），回桌面时顺便核对 vdkeep
+# ---- 切换应用立即冻结后台（BG_FREEZE，默认开）----
+# 打开/切换前台应用时，立刻给上一个后台第三方应用发 SIGSTOP 冻结（0% CPU、停止内存增长，zram 可安心回收其闲置页）；
+# 切回该应用时第一时间发 SIGCONT 秒速恢复，保留原阅读进度。系统应用、桌面、输入法、以及用户设了 KEEPALIVE=1 的应用不冻结。
+bg_pkg_pids() {
+    awk -v p="$1" 'FNR == 1 { sub(/\0.*/, ""); if ($0 == p || index($0, p ":") == 1) { f = FILENAME; sub(/^\/proc\//, "", f); sub(/\/cmdline$/, "", f); print f } }' /proc/[0-9]*/cmdline 2>/dev/null
+}
+bg_freeze_skip() {
+    case "$1" in ""|home|com.veradroid.*|android|com.android.*) return 0 ;; esac
+    appprof_valid_pkg "$1" 2>/dev/null || return 0
+    [ "$(mem_knob "$1" KEEPALIVE)" = 1 ] && return 0
+    return 1
+}
+bg_thaw() {
+    bt_p=$1
+    [ -n "$bt_p" ] || return 0
+    [ -s "$W/memfg.frozen" ] && grep -qxF "$bt_p" "$W/memfg.frozen" 2>/dev/null || return 0
+    bt_pids=$(bg_pkg_pids "$bt_p")
+    [ -n "$bt_pids" ] && kill -CONT $bt_pids 2>/dev/null
+    awk -v p="$bt_p" '$0 != p' "$W/memfg.frozen" > "$W/memfg.frozen.tmp" 2>/dev/null && mv -f "$W/memfg.frozen.tmp" "$W/memfg.frozen"
+    [ -n "$bt_pids" ] && t "bgfreeze: thawed $bt_p"
+    return 0
+}
+bg_thaw_all() {
+    [ -s "$W/memfg.frozen" ] || { rm -f "$W/memfg.frozen"; return 0; }
+    while read -r bta_p; do
+        [ -n "$bta_p" ] || continue
+        bta_pids=$(bg_pkg_pids "$bta_p")
+        [ -n "$bta_pids" ] && kill -CONT $bta_pids 2>/dev/null
+    done < "$W/memfg.frozen"
+    rm -f "$W/memfg.frozen"
+    t "bgfreeze: thawed all background apps"
+    return 0
+}
+bg_freeze_sweep() {
+    if [ "${BG_FREEZE:-1}" != 1 ]; then bg_thaw_all; return 0; fi
+    [ -s "$W/memfg.bg" ] || return 0
+    bf_cur=$(cat "$W/memfg.cur" 2>/dev/null)
+    while read -r bf_p bf_t; do
+        [ "$bf_p" = "$bf_cur" ] && continue
+        bg_freeze_skip "$bf_p" && continue
+        [ -s "$W/memfg.frozen" ] && grep -qxF "$bf_p" "$W/memfg.frozen" 2>/dev/null && continue
+        bf_pids=$(bg_pkg_pids "$bf_p")
+        [ -n "$bf_pids" ] || continue
+        kill -STOP $bf_pids 2>/dev/null || continue
+        echo "$bf_p" >> "$W/memfg.frozen"
+        t "bgfreeze: froze $bf_p ($(echo "$bf_pids" | wc -w | tr -d ' ') procs)"
+    done < "$W/memfg.bg"
+    return 0
+}
+
+# 前台变了：立刻解冻新前台应用；记下上一个应用离开的时间（BG_STOP / BG_FREEZE 用），1 秒后冻结后台应用；回桌面时顺便核对 vdkeep
 mem_fg() {
     mf_new=$1; mf_old=$(cat $W/memfg.cur 2>/dev/null)
+    bg_thaw "$mf_new"
     [ "$mf_new" = "$mf_old" ] && return 0
     echo "$mf_new" > $W/memfg.cur
     wifi_idle_wake
@@ -120,6 +171,9 @@ mem_fg() {
     fi
     [ -f $W/memfg.bg ] && awk -v p="$mf_new" '$1 != p' $W/memfg.bg > $W/memfg.bg.tmp 2>/dev/null && mv -f $W/memfg.bg.tmp $W/memfg.bg
     [ "$mf_new" = home ] && mem_keep_tick
+    if [ "${BG_FREEZE:-1}" = 1 ] && [ -s "$W/pid" ] && [ -s "$W/memfg.bg" ]; then
+        ( sleep 1; bg_freeze_sweep ) >/dev/null 2>&1 &
+    fi
     return 0
 }
 
@@ -153,6 +207,7 @@ bg_stop_tick() {
         fi
         [ "$bs_m" -gt 0 ] 2>/dev/null || continue
         [ $((bs_now - bs_t)) -ge $((bs_m * 60)) ] 2>/dev/null || continue
+        bg_thaw "$bs_p"
         adb_sh "am force-stop $bs_p" >/dev/null 2>&1 && t "bgstop: $bs_p stopped ($(( (bs_now - bs_t) / 60 )) min in background)"
         echo "$bs_p" >> $W/memfg.stopped
     done < $W/memfg.bg

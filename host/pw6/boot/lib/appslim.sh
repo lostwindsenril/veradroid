@@ -173,7 +173,34 @@ appslim_apply() {
     if [ -s "$as_l.tmp" ]; then mv -f "$as_l.tmp" "$as_l"; else rm -f "$as_l.tmp" "$as_l"; fi
     as_tot=0; [ -s "$as_l" ] && as_tot=$(grep -c . "$as_l")
     t "appslim: $as_p $as_vc ${as_why:+($as_why) }$as_w: $as_tot off ($as_nd newly disabled, $as_nr restored$([ "$as_miss" -gt 0 ] 2>/dev/null && echo ", $as_miss not in this version"))"
+    appslim_bloat_plugins "$as_p" "$as_w"
     appslim_knobs
+    return 0
+}
+
+# 清理并只读阻断与阅读无关的动态下发大插件（不改 APK、不碰账号/书架/阅读核心；关掉瘦身时删掉占位文件即可恢复）
+appslim_bloat_plugins() {
+    [ "$1" = "com.dragon.read" ] || return 0
+    ab_root="$SYS/data/data/com.dragon.read/files"
+    [ -d "$ab_root" ] || return 0
+    ab_list="plugins/com.dragon.read.plugin.awemeim plugins/com.dragon.read.plugin.appbrand plugins/com.dragon.read.plugin.clientai plugins/com.dragon.read.plugin.ecomsearch plugins/com.dragon.read.plugin.player plugins/com.dragon.read.plugin.offlinetts plugins/com.dragon.read.plugin.awemevideo plugins/com.dragon.read.plugin.im luckycat_gecko_root_dir"
+    if [ "$2" = on ]; then
+        mkdir -p "$ab_root/plugins" 2>/dev/null || return 0
+        ab_n=0
+        for ab_rel in $ab_list; do
+            ab_t="$ab_root/$ab_rel"
+            if [ -d "$ab_t" ] || [ ! -e "$ab_t" ]; then
+                rm -rf "$ab_t" 2>/dev/null
+                touch "$ab_t" 2>/dev/null && chmod 000 "$ab_t" 2>/dev/null && ab_n=$((ab_n + 1))
+            fi
+        done
+        [ "$ab_n" -gt 0 ] && t "appslim: com.dragon.read blocked $ab_n non-reading dynamic plugins"
+    else
+        for ab_rel in $ab_list; do
+            ab_t="$ab_root/$ab_rel"
+            [ -f "$ab_t" ] && [ ! -s "$ab_t" ] && rm -f "$ab_t" 2>/dev/null
+        done
+    fi
     return 0
 }
 

@@ -86,8 +86,10 @@ final class AppProf {
     static String summary(String spec) {
         Map<String, String> m = parse(spec);
         List<String> l = new ArrayList<String>();
+        String sm = m.get("KFB_SMOOTH");
+        if (sm != null && !sm.equals("0")) l.add("3".equals(sm) ? "高清" : "2".equals(sm) ? "均衡" : "1".equals(sm) ? "快速" : "4".equals(sm) ? "极速" : "自定义");
         String md = m.get("KFB_MODE");
-        if (md != null) l.add("0".equals(md) ? "均衡" : "1".equals(md) ? "灰度最准" : "2".equals(md) ? "最快" : "自动");
+        if (md != null && (sm == null || sm.equals("0"))) l.add("0".equals(md) ? "均衡" : "1".equals(md) ? "灰度最准" : "2".equals(md) ? "最快" : "自动");
         String f = m.get("KFB_FLASH");
         if (f != null) l.add("0".equals(f) ? "不全刷" : "1".equals(f) ? "每页全刷" : "每 " + f + " 页全刷");
         if (m.containsKey("KFB_CONTRAST")) l.add("对比度 " + m.get("KFB_CONTRAST"));

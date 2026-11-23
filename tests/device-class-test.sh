@@ -5,9 +5,7 @@
 cd "$(dirname "$0")/.." || exit 1
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 sed -n '/^vd_device_class() {/,/^}/p' cloud/static/bootstrap.sh > "$T/fn.sh"
-# host/legacy is the legacy line's own release (docs/legacy-line.md): it is checked only once it carries this change.
-HL=; [ -f host/legacy/boot/lib/imgclass.sh ] && HL=legacy
-for h in pw6 k49 $HL; do
+for h in pw6 k49 legacy; do
     sed -n '/^vd_device_class() {/,/^}/p' host/$h/boot/lib/imgclass.sh | cmp -s - "$T/fn.sh" || { echo "FAIL host/$h imgclass.sh vd_device_class differs from bootstrap.sh"; exit 1; }
 done
 . "$T/fn.sh"

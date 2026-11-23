@@ -24,26 +24,6 @@ case "$T" in "$W"/*) ;; *) echo "the tree must be under $W (docker mount)" >&2; 
 # The Oasis configs have CONFIG_LOCALVERSION="" + LOCALVERSION_AUTO, yet the devices report 4.1.15-lab126:
 # Amazon's build passes the suffix on the command line. It only changes the release string, not the CRCs.
 LV=; grep -q '^CONFIG_LOCALVERSION="-lab126"' "$CFG" || LV=LOCALVERSION=-lab126
-# Some packages (KT4 5.18.1.1.1, Oasis 2, PW4 5.15.1.1) lack drivers/video/fbdev/mxc/mxc_epdc_fb_lab126.c. It is only
-# #included by mxc_epdc_v2_fb, which is a module (=m) on these kernels: skip that one module. Its exports live in its
-# own Module.symvers, so neither vmlinux nor any CRC the kernel exports changes.
-MK=$T/drivers/video/fbdev/mxc/Makefile
-if [ ! -f "$T/drivers/video/fbdev/mxc/mxc_epdc_fb_lab126.c" ] && grep -q '^obj-$(CONFIG_FB_MXC_EINK_V2_PANEL)' "$MK"; then
-    grep -q '^CONFIG_FB_MXC_EINK_V2_PANEL=m' "$CFG" || { echo "mxc_epdc_fb_lab126.c missing and the EPDC v2 driver is built in" >&2; exit 1; }
-    sed -i 's|^obj-$(CONFIG_FB_MXC_EINK_V2_PANEL)|# VeraDroid: not built, Amazon left mxc_epdc_fb_lab126.c out of this package (module only)\n#&|' "$MK"
-fi
-# KT4 5.17.1.0.3 package: bd71827-power.c calls usb_gadget_chg_det_sync(), which only max14656_charger_detector.c
-# defines - and that driver is off in the device config, and the device kernel has no such symbol (kallsyms). The
-# shipped kernel was evidently built from a slightly different revision of that file. vmlinux is only linked here to
-# get Module.symvers, so link a no-op stub (not exported: no CRC appears or changes); the CRC comparison below is
-# still what decides.
-PM=$T/drivers/power
-if grep -q 'usb_gadget_chg_det_sync(' "$PM/bd71827-power.c" 2>/dev/null && ! grep -q '^CONFIG_CHARGER_DETECTOR_MAX14656=y' "$CFG" \
-   && ! grep -q ' usb_gadget_chg_det_sync$' "$KSYMS" && [ ! -f "$PM/vd_chgdet_stub.c" ]; then
-    printf '%s\n' '/* VeraDroid: link stub, see tools/kmod/build-amazon.sh */' 'void usb_gadget_chg_det_sync(int delay_ms) { }' > "$PM/vd_chgdet_stub.c"
-    echo 'obj-$(CONFIG_BD71827_POWER) += vd_chgdet_stub.o' >> "$PM/Makefile"
-    echo "$NAME: linked a no-op usb_gadget_chg_det_sync stub (not in the device kernel)"
-fi
 if [ ! -f "$T/vmlinux" ] || ! cmp -s "$CFG" "$T/.vd-config"; then
     cp "$CFG" "$T/.config"
     docker run --rm $LIMITS -v "$AOSP_WORK":"$AOSP_WORK" -w "$T" vdaosp:7.1 sh -c "
@@ -77,9 +57,6 @@ for m in "amz-binder-$NAME/binder.ko" "amz-uinput-$NAME/uinput.ko"; do
     python3 "$HERE/modcrc.py" check "$m" "$CRCS" > "$m.crccheck" || { grep -v '^OK' "$m.crccheck"; echo "$m: CRCs differ from the device" >&2; exit 1; }
     cp "$m" "$OUT/"; ${TC}strip --strip-debug "$OUT/$(basename "$m")"
 done
-# versions.txt: what tools/kmod/check-crc.sh compares on the Kindle before anyone runs insmod
-( cd "$OUT" && for k in binder.ko uinput.ko; do echo "sha256 $k $(sha256sum $k | cut -d' ' -f1)"; done
-  for k in binder.ko uinput.ko; do python3 "$HERE/modcrc.py" show $k | awk -v k=$k '{print k, $1, $2}'; done ) > "$OUT/versions.txt"
 sed -n 's/^Linux version .*) \(#.*\)$/\1/p' "$NAME.banner" > "$OUT/uname-v"
 [ -s "$OUT/uname-v" ] || { echo "no $NAME.banner (run build-imx41.sh / kimage.py first)" >&2; exit 1; }
 printf 'built from Amazon %s, device config, unmodified __versions (all CRCs equal the device kernel)\n' "$(basename "$(dirname "$T")")/$(basename "$T")" > "$OUT/BUILD-NOTES"

@@ -13,12 +13,12 @@ import android.widget.ScrollView;
  */
 class PageScrollView extends ScrollView {
     private final int slop;
-    private float downY;
+    private float downX, downY;
     private boolean dragging;
 
     PageScrollView(Context c) {
         super(c);
-        slop = ViewConfiguration.get(c).getScaledTouchSlop() * 2;
+        slop = Math.max(12, ViewConfiguration.get(c).getScaledTouchSlop());
         setVerticalScrollBarEnabled(false);
         setOverScrollMode(OVER_SCROLL_NEVER);
         setSmoothScrollingEnabled(false);
@@ -27,15 +27,19 @@ class PageScrollView extends ScrollView {
     @Override public boolean onInterceptTouchEvent(MotionEvent e) {
         switch (e.getActionMasked()) {
         case MotionEvent.ACTION_DOWN:
+            downX = e.getX();
             downY = e.getY();
             dragging = false;
             return false;
-        case MotionEvent.ACTION_MOVE:
-            if (Math.abs(e.getY() - downY) > slop) {
+        case MotionEvent.ACTION_MOVE: {
+            float dx = Math.abs(e.getX() - downX);
+            float dy = Math.abs(e.getY() - downY);
+            if (dy > slop && dy > dx) {
                 dragging = true;
                 return true;
             }
             return false;
+        }
         case MotionEvent.ACTION_UP:
         case MotionEvent.ACTION_CANCEL:
             dragging = false;
@@ -194,7 +198,7 @@ class PageScrollView extends ScrollView {
             android.view.View c = g.getChildAt(i);
             if (c.getVisibility() == GONE) continue;
             if (c instanceof android.widget.LinearLayout && ((android.widget.LinearLayout) c).getOrientation() == android.widget.LinearLayout.VERTICAL
-                && ((android.view.ViewGroup) c).getChildCount() > 1 && c.getHeight() > getHeight() * 7 / 10) {
+                && ((android.view.ViewGroup) c).getChildCount() > 2 && c.getHeight() > getHeight() * 2 / 5) {
                 android.view.ViewGroup cg = (android.view.ViewGroup) c;
                 for (int k = 0; k < cg.getChildCount(); k++) {
                     android.view.View r = cg.getChildAt(k);

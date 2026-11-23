@@ -155,15 +155,18 @@ compile_rec() { # pkg dir result [filter]（给了 filter 只算这个过滤器�
     cr_s=$(date -r "$SYS/data/app/$2/base.apk" +%Y%m%d-%H%M%S 2>/dev/null)
     awk -v p="$1" -v d="$2" -v r="$3" -v s="$cr_s" -v m="$4" '$1 == p && $2 == d && $3 == r && $6 >= s && (m == "" || $4 == m) { n++ } END { print n + 0 }' $CLOG
 }
-# 这个包要不要编（$2=force 时只要装着就编）
-compile_needed() { # pkg [force]
+# 这个包要不要编（$2=force 时只要装着就编；stale 绕过 odex_filter 检查，但仍尊重同版本的 crash / fail 上限）
+compile_needed() { # pkg [force|stale]
     app_dir "$1" >/dev/null || return 1
-    case "$2" in force|stale) return 0 ;; esac
+    [ "$2" = force ] && return 0
     cn_m=$(compile_pkg_mode "$1" speed)
-    compile_done_filter "$(odex_filter "$1")" "$cn_m" && return 1
-    # 同一个安装失败过两次就不再自动试（命令 compile <包> 仍然会强制编）。超时只挡同一个过滤器：大应用 speed 超时以后改编 speed-profile
+    [ "$2" = stale ] || { compile_done_filter "$(odex_filter "$1")" "$cn_m" && return 1; }
+    # 同一个安装 dex2oat 崩溃过（SIGSEGV/SIGABRT，如加固包）或失败过两次就不再自动试（命令 compile <包> 仍然会强制编）。
+    # 超时只挡同一个过滤器：大应用 speed 超时以后改编 speed-profile
     cn_d=$(app_dir "$1")
+    [ "$(compile_rec "$1" "$cn_d" crash)" -gt 0 ] && return 1
     [ "$(compile_rec "$1" "$cn_d" fail)" -ge 2 ] && return 1
+    [ "$2" = stale ] && return 0
     [ "$(compile_rec "$1" "$cn_d" capped)" -gt 0 ] && return 1
     [ "$(compile_rec "$1" "$cn_d" timeout "$cn_m")" -gt 0 ] && return 1
     return 0
@@ -215,6 +218,7 @@ compile_scan() { # 所有还没编好的数据区应用排队
     compile_stale_pkgs | while read -r p st; do
         grep -q "^$p\$" $W/compile.stale 2>/dev/null && continue
         echo "$p" >> $W/compile.stale
+        compile_needed "$p" stale || continue
         t "compile: $p compiled code not usable ($st), $( [ "$st" = NeedsRelocation ] && echo relocating || echo recompiling)"
         compile_enqueue "$p" stale
     done
@@ -723,6 +727,21 @@ compile_restore_next() {
     rm -f $W/compile.abort
     return 0
 }
+# dex2oat 是否因 SIGSEGV / SIGABRT 崩溃（加固包如 com.jjwxc.reader 的 libshell-super）：
+# 查返回码（134/139）、命令输出，以及本次编译期间新写入的 dex2oat tombstone
+compile_dex2oat_crashed() { # start_epoch out_file rc
+    case "$3" in 134|139) return 0 ;; esac
+    grep -q -e SIGSEGV -e SIGABRT -e 'Segmentation fault' -e Aborted -e 'Fatal signal 11' -e 'Fatal signal 6' "$2" 2>/dev/null && return 0
+    [ -d $SYS/data/tombstones ] || return 1
+    for cdc_f in $SYS/data/tombstones/tombstone_*; do
+        [ -f "$cdc_f" ] || continue
+        cdc_m=$(stat -c %Y "$cdc_f" 2>/dev/null) || continue
+        [ "$cdc_m" -ge "$1" ] 2>/dev/null || continue
+        head -n 20 "$cdc_f" 2>/dev/null | grep -q 'dex2oat' || continue
+        head -n 20 "$cdc_f" 2>/dev/null | grep -q -e 'SIGSEGV' -e 'SIGABRT' && return 0
+    done
+    return 1
+}
 compile_one() { # pkg mode [force|stale]
     pkg=$1; mode=$2; cflag=-f; [ "$3" = stale ] && cflag=
     dir=$(app_dir "$pkg") || return 1
@@ -743,6 +762,7 @@ compile_one() { # pkg mode [force|stale]
     case "$oflags" in *--no-watch-dog*) ;; '') adb_sh "setprop dalvik.vm.dex2oat-flags --no-watch-dog" >/dev/null 2>&1 ;;
         *) adb_sh "setprop dalvik.vm.dex2oat-flags '$oflags --no-watch-dog'" >/dev/null 2>&1 ;; esac
     s=$(cut -d. -f1 /proc/uptime)
+    cs_ts=$(date +%s)
     [ "$mode" = speed-profile ] && compile_prof_save "$pkg"
     compile_pm_start "$pkg" $W/compile.out -m $mode $cflag $pkg
     compile_babysit $cp_ "$pkg"
@@ -763,8 +783,8 @@ compile_one() { # pkg mode [force|stale]
     # 不再强制重排（Oasis 2 用户日志：busy 停了个空，590 秒后 Success，以前记成 aborted 又从头编一遍）
     if [ "$f" = "$mode" ] && grep -q Success $W/compile.out; then r=ok
     elif [ "$ab" = install ]; then r=aborted   # 给安装让路：compile_release 会重新排队，不算失败
-    # 到了前台 / 用户在用且内存紧：不算失败，重新排队（前台时跳过，空闲时再编）
-    elif [ "$ab" = foreground ] || [ "$ab" = running ] || [ "$ab" = busy ] || [ "$ab" = session ]; then r=aborted
+    # 到了前台 / 用户在用且内存紧 / 低内存中止：不算失败，重新排队（空闲时再编，不立刻在 OOM 压力下起 compile_light）
+    elif [ "$ab" = foreground ] || [ "$ab" = running ] || [ "$ab" = busy ] || [ "$ab" = session ] || [ "$ab" = memory ]; then r=aborted
     # 超过 COMPILE_MAX_S 被停：这台机器上这个过滤器编不完（512 MB 机型上微信读书的 speed），同一个安装不再自动试（compile_needed），
     # 下面马上补 interpret-only（两分钟左右），不让应用停在没有 odex、从 apk 解释执行的状态
     elif [ "$ab" = timeout ]; then r=timeout
@@ -776,6 +796,8 @@ compile_one() { # pkg mode [force|stale]
     # 这不是失败，再编多少次也一样：记成 capped，以后不再自动排队。
     elif [ -n "$f" ] && grep -q Success $W/compile.out; then r=capped
     else r=fail; fi
+    # 加固 APK（如 libshell-super）触发 dex2oat SIGSEGV/SIGABRT：记为 crash，跳过 compile_light 且同版本不再自动重试
+    [ "$r" = fail ] && compile_dex2oat_crashed "$cs_ts" $W/compile.out "$rc" && r=crash
     case "$oflags" in *--no-watch-dog*) ;; *) adb_sh "setprop dalvik.vm.dex2oat-flags '$oflags'" >/dev/null 2>&1 ;; esac
     # 失败时 installd 已经删掉了原来的 odex（pw6-5195 实测：interpret-only 的 odex 没了，应用只能从 apk 里边校验边解释）。
     # 马上（用原来的 dex2oat 参数，线程数仍按上面限制：kt6-5192 上不限时这一步 dex2oat 峰值 150 MB）补一个 interpret-only，
@@ -790,7 +812,7 @@ compile_one() { # pkg mode [force|stale]
     # 被停掉（到了前台 / 起了进程 / 在用且内存紧 / Android 里有安装）时 installd 也已经把原来的 odex 截掉了：应用比编之前还慢
     # （filter=none，从 apk 解释执行；Scribe / Oasis 2 用户日志里微信读书一整天都是这样）。记进 compile.restore，等它退出、
     # 条件满足（工作进程挑包时，和别的编译同样的规矩）先补一个轻量的 interpret-only，speed 的重排照旧
-    case "$ab" in foreground|running|busy|session)
+    case "$ab" in foreground|running|busy|session|memory)
         [ $r = aborted ] && [ -z "$f" ] && { grep -qx "$pkg" $W/compile.restore 2>/dev/null || echo "$pkg" >> $W/compile.restore; } ;;
     esac
     [ -n "$thr" ] && adb_sh "setprop dalvik.vm.dex2oat-threads '$othr'" >/dev/null 2>&1
@@ -799,16 +821,16 @@ compile_one() { # pkg mode [force|stale]
     { tail -n 199 $CLOG 2>/dev/null; echo "$pkg $dir $r $mode ${sec}s $(date +%Y%m%d-%H%M%S)"; } > $CLOG.tmp 2>/dev/null && mv -f $CLOG.tmp $CLOG
     echo "$pkg $r $sec" > $W/compile.last
     [ $r = ok ] || case "$ab" in
-        foreground|running|busy|session)
+        foreground|running|busy|session|memory)
             sed -i "/^$pkg\( \|\$\)/d" $CQ 2>/dev/null; echo "$pkg force" >> $CQ
             echo $(( $(cat $W/compile.total 2>/dev/null || echo 0) + 1 )) > $W/compile.total
-            if [ "$ab" = busy ]; then
+            if [ "$ab" = busy ] || [ "$ab" = memory ]; then
                 : > $W/compile.needidle
                 # 手动开始时还是被停了（内存掉到底线 COMPILE_MANUAL_ABORT_MB，或大应用编着时有应用到了前台）：手动这一批到此为止，等空闲再接着编（不然停了又开、开了又停）
                 compile_manual && { rm -f $W/compile.manual; t "compile: manual start ended, the compile was stopped for the app in use (low memory or a large app with another app in front); continuing when idle"; }
             fi ;;
     esac
-    [ "$r" != fail ]
+    [ "$r" != fail ] && [ "$r" != crash ]
 }
 compile_worker() {
     trap 'rm -f $W/compile.pid; rm -rf $W/compile.lock' EXIT
@@ -922,6 +944,7 @@ compile_cmd() {
             for p in $(data_pkgs); do compile_enqueue "$p"; done
             compile_stale_pkgs | while read -r p st; do
                 grep -q "^$p\( \|\$\)" $CQ 2>/dev/null && continue
+                compile_needed "$p" stale || continue
                 t "compile: $p compiled code not usable ($st), queued by the manual start"
                 compile_enqueue "$p" stale
             done

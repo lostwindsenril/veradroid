@@ -214,8 +214,8 @@ after_boot() {
         adb_sh 'settings put global hide_error_dialogs 1; settings put global show_first_crash_dialog 0; settings put global show_restart_in_crash_dialog 0' >/dev/null 2>&1
         # 系统里没有开机向导（Provision）：不标记“已完成设置”时 HOME 键被忽略（user setup is in progress）、快捷设置受限
         adb_sh 'settings put global device_provisioned 1; settings put secure user_setup_complete 1' >/dev/null 2>&1
-        # 用不到的后台服务：通知排序助手常驻约 37 MB
-        adb_sh 'pm disable-user --user 0 android.ext.services' >/dev/null 2>&1
+        # 用不到的后台服务：通知排序助手常驻约 37 MB；并关闭云备份与后台扫描省电（参考文石 Go 6 Gen 2）
+        adb_sh 'pm disable-user --user 0 android.ext.services; settings put secure backup_enabled 0; settings put global wifi_scan_always_enabled 0' >/dev/null 2>&1
         slim_after_boot
         if lowmem; then
             set -- $(heap_values); hg=$1; hs=$2   # 和 heap_fix 一致（memory.sh）

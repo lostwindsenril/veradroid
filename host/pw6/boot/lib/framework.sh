@@ -113,6 +113,7 @@ kindle_home() {
     max=240; [ -n "$NOFW" ] && max=720
     i=0
     until lipc-probe com.lab126.KPPMainApp 2>/dev/null | grep -qw go || [ $i -ge $max ]; do usleep 250000; i=$((i + 1)); done
+    perf_mark "fw: library app probe done ($i rounds)"
     if [ -f /etc/upstart/kppmainapp.conf ]; then
         lipc-set-prop com.lab126.appmgrd start "app://com.lab126.KPPMainApp?view=KPP_HOME"
     else
@@ -272,7 +273,8 @@ framework_stop() {
             # 就把框架起回去并记下来——宁可不省内存，也不能让电源键失灵。模式记成 stopfail：返回时照样要把跟着框架停掉的任务起回去。
             i=0; ok=
             while [ $i -lt 12 ]; do
-                [ "$(lipc-get-prop com.lab126.kaf frameworkStarted 2>/dev/null)" = 1 ] && kill -0 "$(cat $W/vdkaf.pid 2>/dev/null)" 2>/dev/null && { ok=1; break; }
+                _vp=$(cat $W/vdkaf.pid 2>/dev/null)
+                [ "$(lipc-get-prop com.lab126.kaf frameworkStarted 2>/dev/null)" = 1 ] && [ -n "$_vp" ] && kill -0 "$_vp" 2>/dev/null && { ok=1; break; }
                 [ -f $FWD/abort ] && { ok=abort; break; }     # 正在恢复：自检没意义，更不能记 vdkaf.bad
                 sleep 1; i=$((i + 1))
             done
@@ -414,6 +416,7 @@ framework_start() {
     fi
     # 写回后整屏刷一次：书库没变时它不重画，墨水屏会一直停在我们的画面上
     [ -x "$FBINK" ] && "$FBINK" -q -s 2>/dev/null
+    perf_mark "fw: kindle screen restored"
     DISPLAY=:0 xinput enable kindle-input-pt 2>/dev/null
     killall -CONT awesome 2>/dev/null
     # USB（固件 5.16.3 以后是 MTP：volumd 收到插线事件后用 lipc 叫 com.lab126.mtp 的 startMtp，由它打开 USB 设备）。
@@ -455,7 +458,11 @@ framework_start() {
         # 框架要重新启动（冷启动约一分钟）：告诉用户在等什么，不然屏幕上是停之前存下的那一帧，点了没反应
         fw_wait_screen || splash "正在恢复 Kindle 界面，大约需要一分钟…" 36
         fw_wait_ready
-        wait $fw_svp 2>/dev/null
+        # upstart 的 `start framework` 要等框架自己的 post-start（lipc-wait-event -s 0 … FrameworkStarted，没有超时）：框架起不来时
+        # 以前这里就永远等下去，返回 Kindle 的整个流程（和之后的“启动”）一起卡死（PW5 512 MB 模拟器实测卡了 18 分钟）。
+        # fw_wait_ready 已经最多等过 FW_READY_MAX 秒：再给这一段最多 30 秒，还没完就不等了（它在后台照样会把剩下的服务起完）。
+        i=0; while kill -0 $fw_svp 2>/dev/null && [ $i -lt 150 ]; do usleep 200000; i=$((i + 1)); done
+        kill -0 $fw_svp 2>/dev/null && t "fw: framework / services still starting after the wait: not waiting any longer"
         if grep -qx kppmainapp $FWD/stopped 2>/dev/null && ! initctl status kppmainapp 2>/dev/null | grep -q "start/"; then
             t "fw: library app not started by upstart after framework_ready: starting it"
             start kppmainapp >/dev/null 2>&1
@@ -465,8 +472,18 @@ framework_start() {
     else
         fw_start_many $fw_svc
     fi
-    sleep 1
-    kindle_home
+    perf_mark "fw: services started ($fw_svc)"
+    if [ -n "$NOFW" ]; then
+        sleep 1
+        kindle_home
+        perf_mark "fw: library app answers, home requested"
+    else
+        # 框架没停过（freeze / keep）：书库程序刚被解冻，存下的画面已经写回屏幕，用户这时已经能点书库了。等它回答 lipc 再请
+        # appmgrd 回主页这一步放到后台：真机上要 9–21 秒（PW6 模拟器上等满 60 秒），以前整段返回流程（冻结标记之后的收尾、
+        # 下一次“启动”要等的这个 shell）都卡在这里（perf/ret，tools/bench 的宿主日志时间线）。用户看到的不变。
+        # 后台这一段不能开着系统盘上的东西（stop.sh 也调 framework_start，随后要卸载系统盘）：cwd 是 /、输出写 tmpfs
+        ( cd /; sleep 1; kindle_home; t "fw: library app answers, home requested (background)" ) </dev/null >>$W/fwhome.log 2>&1 &
+    fi
     type vp_ticker_stop >/dev/null 2>&1 && vp_ticker_stop
     # 书库程序是我们停的（低内存模式 / KINDLE_UI=stop）：停它的那一刻它是 appmgrd 的前台应用，appmgrd 当它崩了，弹出
     # “Application Error / The selected application could not be started”（pillow 的 appmgrAppFailedFatal 提示框）。

@@ -87,6 +87,7 @@ final class BlocksCards {
      * 主页恢复时（自己还没画）各页抽稀取一张小灰度图，和离开主页时取的那张比，变了的那一页就是应用的画面。
      * 只读像素、不碰别的应用的数据。
      */
+    private static final java.util.concurrent.ExecutorService fbExec = Ui.lowExecutor("fb-sample");
     private static byte[][] homeSample;
     private static int sampleW, sampleH;
 
@@ -129,7 +130,10 @@ final class BlocksCards {
     /** 离开主页去开应用时：记下主页自己的画面（两页），回来时用来认出哪一页是应用画的。 */
     static void onLeaveHome(Context c) {
         if (!wantsLastApp(c)) return;
-        homeSample = sampleFb(c);
+        final Context app = c.getApplicationContext();
+        fbExec.execute(new Runnable() { @Override public void run() {
+            homeSample = sampleFb(app);
+        } });
     }
 
     private static boolean wantsLastApp(Context c) { return Blocks.on(c) && order(c).contains("continue"); }
@@ -152,28 +156,38 @@ final class BlocksCards {
         captureLastApp(a, lastForeground(a));
     }
 
-    static void captureLastApp(HomeActivity a, String pkg) {
+    static void captureLastApp(HomeActivity a, final String pkg) {
         if (pkg == null || !wantsLastApp(a) || a.findApp(pkg) == null || !readers(a).contains(pkg)) return;
-        byte[][] now = sampleFb(a);
-        if (now == null) return;
-        int pick = 0;
-        if (homeSample != null && homeSample[0].length == now[0].length) {
-            long d0 = diff(now[0], homeSample[0]), d1 = diff(now[1], homeSample[1]);
-            pick = d1 > d0 ? 1 : 0;
-            if (Math.max(d0, d1) == 0) return;   // 两页都还是主页的画面：应用没画过东西
-        }
-        final int w = sampleW, h = sampleH;
-        int[] px = new int[w * h];
-        byte[] src = now[pick];
-        for (int i = 0; i < px.length; i++) { int v = src[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
-        final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
-        thumb = bm; thumbPkg = pkg;
-        Store.prefs(a, "home").edit().putString("la_pkg", pkg).putLong("la_time", System.currentTimeMillis()).apply();
-        final File out = new File(Store.cache("lastapp"), "thumb.png");
-        new Thread(new Runnable() { @Override public void run() {
-            Ui.lowPriority();
-            try { FileOutputStream o = new FileOutputStream(out); bm.compress(Bitmap.CompressFormat.PNG, 100, o); o.close(); } catch (Throwable ignored) { }
-        } }, "lastapp-thumb").start();
+        final Context app = a.getApplicationContext();
+        fbExec.execute(new Runnable() { @Override public void run() {
+            byte[][] now = sampleFb(app);
+            if (now == null) return;
+            int pick = 0;
+            if (homeSample != null && homeSample[0].length == now[0].length) {
+                long d0 = diff(now[0], homeSample[0]), d1 = diff(now[1], homeSample[1]);
+                pick = d1 > d0 ? 1 : 0;
+                if (Math.max(d0, d1) == 0) return;   // 两页都还是主页的画面：应用没画过东西
+            }
+            final int w = sampleW, h = sampleH;
+            int[] px = new int[w * h];
+            byte[] src = now[pick];
+            for (int i = 0; i < px.length; i++) { int v = src[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
+            final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
+            final long ts = System.currentTimeMillis();
+            ui.post(new Runnable() { @Override public void run() {
+                thumb = bm; thumbPkg = pkg;
+                Store.prefs(app, "home").edit().putString("la_pkg", pkg).putLong("la_time", ts).apply();
+            } });
+            File out = new File(Store.cache("lastapp"), "thumb.png");
+            FileOutputStream o = null;
+            try {
+                o = new FileOutputStream(out);
+                bm.compress(Bitmap.CompressFormat.PNG, 100, o);
+            } catch (Throwable ignored) {
+            } finally {
+                try { if (o != null) o.close(); } catch (Throwable ignored) { }
+            }
+        } });
     }
 
     /**

@@ -351,6 +351,216 @@ PATCHES = [
      "            return false;\n"
      "        }\n"
      "        update();"),
+    # healthd: drop EPOLLWAKEUP and fall back to CLOCK_BOOTTIME when CAP_WAKE_ALARM is stripped by vdnocap
+    ("system/core/healthd/healthd.cpp",
+     "    if (wakeup == EVENT_WAKEUP_FD)\n        ev.events |= EPOLLWAKEUP;\n",
+     "    (void)wakeup;  // VeraDroid: no wakeup source (Android may be frozen when a battery event / timer arrives)\n"),
+    ("system/core/healthd/healthd.cpp",
+     "    wakealarm_fd = timerfd_create(CLOCK_BOOTTIME_ALARM, TFD_NONBLOCK);\n",
+     "    wakealarm_fd = timerfd_create(CLOCK_BOOTTIME_ALARM, TFD_NONBLOCK);\n"
+     "    if (wakealarm_fd == -1 && errno == EPERM)   // VeraDroid: no CAP_WAKE_ALARM under vdnocap\n"
+     "        wakealarm_fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK);\n"),
+    # Clamp >100% capacity (max77796-battery reports 105 when full) and preserve mV voltage_now on i.MX7D Kindles
+    ("system/core/healthd/BatteryMonitor.cpp",
+     "    props.batteryLevel = mBatteryFixedCapacity ?\n"
+     "        mBatteryFixedCapacity :\n"
+     "        getIntField(mHealthdConfig->batteryCapacityPath);\n"
+     "    props.batteryVoltage = getIntField(mHealthdConfig->batteryVoltagePath) / 1000;\n",
+     "    props.batteryLevel = mBatteryFixedCapacity ?\n"
+     "        mBatteryFixedCapacity :\n"
+     "        getIntField(mHealthdConfig->batteryCapacityPath);\n"
+     "    if (props.batteryLevel > 100) props.batteryLevel = 100; // VeraDroid: max77796-battery reports 105 when full\n"
+     "    int rawMv = getIntField(mHealthdConfig->batteryVoltagePath);\n"
+     "    props.batteryVoltage = (rawMv > 0 && rawMv < 20000) ? rawMv : rawMv / 1000; // VeraDroid: max77796-battery reports mV\n"),
+    ("system/core/healthd/BatteryMonitor.cpp",
+     "    case BATTERY_PROP_CAPACITY:\n"
+     "        if (!mHealthdConfig->batteryCapacityPath.isEmpty()) {\n"
+     "            val->valueInt64 =\n"
+     "                getIntField(mHealthdConfig->batteryCapacityPath);\n"
+     "            ret = NO_ERROR;\n",
+     "    case BATTERY_PROP_CAPACITY:\n"
+     "        if (!mHealthdConfig->batteryCapacityPath.isEmpty()) {\n"
+     "            val->valueInt64 =\n"
+     "                getIntField(mHealthdConfig->batteryCapacityPath);\n"
+     "            if (val->valueInt64 > 100) val->valueInt64 = 100; // VeraDroid: max77796-battery reports 105 when full\n"
+     "            ret = NO_ERROR;\n"),
+    # hostns: ignore host udevd userspace uevent rebroadcasts (nl_pid != 0, uid == 0) and normalize chroot /rootfs/dev/null
+    ("system/core/libsysutils/src/NetlinkListener.cpp",
+     "        SLOGE(\"recvmsg failed (%s)\", strerror(errno));\n",
+     "        if (errno != EIO || uid > 0) SLOGE(\"recvmsg failed (%s)\", strerror(errno)); // VeraDroid: ignore host udevd rebroadcasts\n"),
+    ("frameworks/base/core/jni/fd_utils-inl.h",
+     "    std::string file_path;\n"
+     "    if (!Readlink(fd, &file_path)) {\n"
+     "      return NULL;\n"
+     "    }\n",
+     "    std::string file_path;\n"
+     "    if (!Readlink(fd, &file_path)) {\n"
+     "      return NULL;\n"
+     "    }\n"
+     "    if (file_path.size() > 16 &&\n"
+     "        file_path.compare(file_path.size() - 16, 16, \"/rootfs/dev/null\") == 0) {\n"
+     "      file_path = \"/dev/null\"; // VeraDroid: normalize hostns chroot /dev/null\n"
+     "    }\n"),
+    # Deduplicate redundant RTM_NEWLINK "wlan0 link up" notifications in hostnet mode while still syncing real IP/route changes
+    ("frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java",
+     "    private void updateInterfaceState(String iface, boolean up) {\n"
+     "        if (!mIface.equals(iface)) {\n"
+     "            return;\n"
+     "        }\n"
+     "        Log.d(TAG, \"updateInterface: \" + iface + \" link \" + (up ? \"up\" : \"down\"));",
+     "    private void updateInterfaceState(String iface, boolean up) {\n"
+     "        if (!mIface.equals(iface)) {\n"
+     "            return;\n"
+     "        }\n"
+     "        synchronized (this) {\n"
+     "            if (up && mLinkUp && mNetworkAgent != null) {\n"
+     "                if (VdHostNet.enabled()) {\n"
+     "                    LinkProperties vdLp = VdHostNet.linkPropertiesQuiet(iface);\n"
+     "                    if (vdLp != null && !vdLp.equals(mLinkProperties)) {\n"
+     "                        mLinkProperties = vdLp;\n"
+     "                        Log.i(TAG, \"VeraDroid hostnet: updated link properties: \" + vdLp);\n"
+     "                        updateAgent();\n"
+     "                    }\n"
+     "                }\n"
+     "                return;\n"
+     "            }\n"
+     "        }\n"
+     "        Log.d(TAG, \"updateInterface: \" + iface + \" link \" + (up ? \"up\" : \"down\"));"),
+    # Skip /sys/kernel/ipv4/tcp_* writes once proven absent/unwritable on Kindle kernels
+    ("frameworks/base/services/core/java/com/android/server/ConnectivityService.java",
+     "        if (values == null || values.length != 6) {\n"
+     "            if (DBG) log(\"Invalid tcpBufferSizes string: \" + tcpBufferSizes +\", using defaults\");\n"
+     "            tcpBufferSizes = DEFAULT_TCP_BUFFER_SIZES;\n"
+     "            values = tcpBufferSizes.split(\",\");\n"
+     "        }\n"
+     "\n"
+     "        if (tcpBufferSizes.equals(mCurrentTcpBufferSizes)) return;\n"
+     "\n"
+     "        try {\n"
+     "            if (VDBG) Slog.d(TAG, \"Setting tx/rx TCP buffers to \" + tcpBufferSizes);\n"
+     "\n"
+     "            final String prefix = \"/sys/kernel/ipv4/tcp_\";",
+     "        if (values == null || values.length != 6) {\n"
+     "            if (DBG && tcpBufferSizes != null) log(\"Invalid tcpBufferSizes string: \" + tcpBufferSizes +\", using defaults\");\n"
+     "            tcpBufferSizes = DEFAULT_TCP_BUFFER_SIZES;\n"
+     "            values = tcpBufferSizes.split(\",\");\n"
+     "        }\n"
+     "\n"
+     "        if (tcpBufferSizes.equals(mCurrentTcpBufferSizes)) return;\n"
+     "        if (!new java.io.File(\"/sys/kernel/ipv4/tcp_rmem_min\").canWrite()) {\n"
+     "            mCurrentTcpBufferSizes = tcpBufferSizes;\n"
+     "            return;\n"
+     "        }\n"
+     "\n"
+     "        try {\n"
+     "            if (VDBG) Slog.d(TAG, \"Setting tx/rx TCP buffers to \" + tcpBufferSizes);\n"
+     "\n"
+     "            final String prefix = \"/sys/kernel/ipv4/tcp_\";"),
+    # Negative-cache absent /proc/uid_cputime/show_uid_stat and Telecom/ContentProvider lookups; silence cutils-trace ENOENT
+    ("frameworks/base/core/java/com/android/internal/os/KernelUidCpuTimeReader.java",
+     "    private long mLastTimeReadUs = 0;\n"
+     "\n"
+     "    /**\n"
+     "     * Reads the proc file, calling into the callback with a delta of time for each UID.",
+     "    private long mLastTimeReadUs = 0;\n"
+     "    private static boolean sVdNoUidCpuTime = false;\n"
+     "\n"
+     "    /**\n"
+     "     * Reads the proc file, calling into the callback with a delta of time for each UID."),
+    ("frameworks/base/core/java/com/android/internal/os/KernelUidCpuTimeReader.java",
+     "    public void readDelta(@Nullable Callback callback) {\n"
+     "        long nowUs = SystemClock.elapsedRealtime() * 1000;",
+     "    public void readDelta(@Nullable Callback callback) {\n"
+     "        if (sVdNoUidCpuTime) return;\n"
+     "        long nowUs = SystemClock.elapsedRealtime() * 1000;"),
+    ("frameworks/base/core/java/com/android/internal/os/KernelUidCpuTimeReader.java",
+     "        } catch (IOException e) {\n"
+     "            Slog.e(TAG, \"Failed to read uid_cputime: \" + e.getMessage());\n"
+     "        }",
+     "        } catch (IOException e) {\n"
+     "            sVdNoUidCpuTime = true;\n"
+     "        }"),
+    ("frameworks/base/core/java/com/android/internal/os/KernelUidCpuTimeReader.java",
+     "        try (FileWriter writer = new FileWriter(sRemoveUidProcFile)) {",
+     "        if (sVdNoUidCpuTime) return;\n        try (FileWriter writer = new FileWriter(sRemoveUidProcFile)) {"),
+    ("system/core/libcutils/trace-dev.c",
+     "    if (atrace_marker_fd == -1) {\n"
+     "        ALOGE(\"Error opening trace file: %s (%d)\", strerror(errno), errno);",
+     "    if (atrace_marker_fd == -1) {\n"
+     "        if (errno != ENOENT) ALOGE(\"Error opening trace file: %s (%d)\", strerror(errno), errno);"),
+    ("frameworks/base/telecomm/java/android/telecom/TelecomManager.java",
+     "    private ITelecomService getTelecomService() {\n"
+     "        if (mTelecomServiceOverride != null) {\n"
+     "            return mTelecomServiceOverride;\n"
+     "        }\n"
+     "        return ITelecomService.Stub.asInterface(ServiceManager.getService(Context.TELECOM_SERVICE));\n"
+     "    }\n"
+     "\n"
+     "    private boolean isServiceConnected() {\n"
+     "        boolean isConnected = getTelecomService() != null;\n"
+     "        if (!isConnected) {\n"
+     "            Log.w(TAG, \"Telecom Service not found.\");\n"
+     "        }\n"
+     "        return isConnected;\n"
+     "    }",
+     "    private static int sVdSlimNoTelecom = -1;\n"
+     "    private ITelecomService getTelecomService() {\n"
+     "        if (mTelecomServiceOverride != null) {\n"
+     "            return mTelecomServiceOverride;\n"
+     "        }\n"
+     "        if (sVdSlimNoTelecom < 0) {\n"
+     "            sVdSlimNoTelecom = android.os.SystemProperties.getInt(\"ro.vd.slim\", 0) > 0 &&\n"
+     "                    ServiceManager.checkService(Context.TELECOM_SERVICE) == null ? 1 : 0;\n"
+     "        }\n"
+     "        if (sVdSlimNoTelecom == 1) return null;\n"
+     "        return ITelecomService.Stub.asInterface(ServiceManager.getService(Context.TELECOM_SERVICE));\n"
+     "    }\n"
+     "\n"
+     "    private boolean isServiceConnected() {\n"
+     "        boolean isConnected = getTelecomService() != null;\n"
+     "        if (!isConnected && sVdSlimNoTelecom != 1) {\n"
+     "            Log.w(TAG, \"Telecom Service not found.\");\n"
+     "        }\n"
+     "        return isConnected;\n"
+     "    }"),
+    ("frameworks/base/core/java/android/app/ActivityThread.java",
+     "    public final IContentProvider acquireProvider(\n"
+     "            Context c, String auth, int userId, boolean stable) {\n"
+     "        final IContentProvider provider = acquireExistingProvider(c, auth, userId, stable);\n"
+     "        if (provider != null) {\n"
+     "            return provider;\n"
+     "        }",
+     "    private final ArrayMap<String, Long> mVdMissingProviders = new ArrayMap<String, Long>();\n"
+     "    public final IContentProvider acquireProvider(\n"
+     "            Context c, String auth, int userId, boolean stable) {\n"
+     "        final IContentProvider provider = acquireExistingProvider(c, auth, userId, stable);\n"
+     "        if (provider != null) {\n"
+     "            return provider;\n"
+     "        }\n"
+     "        if (auth != null) {\n"
+     "            synchronized (mVdMissingProviders) {\n"
+     "                Long ts = mVdMissingProviders.get(auth);\n"
+     "                if (ts != null && SystemClock.uptimeMillis() - ts.longValue() < 60000L) {\n"
+     "                    return null;\n"
+     "                }\n"
+     "            }\n"
+     "        }"),
+    ("frameworks/base/core/java/android/app/ActivityThread.java",
+     "        if (holder == null) {\n"
+     "            Slog.e(TAG, \"Failed to find provider info for \" + auth);\n"
+     "            return null;\n"
+     "        }",
+     "        if (holder == null) {\n"
+     "            if (auth != null) {\n"
+     "                synchronized (mVdMissingProviders) {\n"
+     "                    if (mVdMissingProviders.size() >= 16) mVdMissingProviders.clear();\n"
+     "                    if (mVdMissingProviders.put(auth, SystemClock.uptimeMillis()) == null) {\n"
+     "                        Slog.w(TAG, \"Failed to find provider info for \" + auth);\n"
+     "                    }\n"
+     "                }\n"
+     "            }\n"
+     "            return null;\n"
+     "        }"),
 ]
 for patch in PATCHES:
     rel, old, new = patch[:3]

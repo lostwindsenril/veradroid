@@ -316,7 +316,7 @@ appprof_oec_publish() {
                val[p, k] = v; if (!((p, k) in has)) { has[p, k] = 1; keys[p] = keys[p] " " k } } }
          END { for (i = 1; i <= n; i++) { p = ord[i]; if (keys[p] == "") continue
                c = split(substr(keys[p], 2), ks, " "); out = ""
-               for (j = 1; j <= c; j++) out = out (out == "" ? "" : ";") ks[j] "=" val[p, ks[j]]
+               for (j = 1; j <= c; j++) { sep = (out == "" ? "" : ";"); out = out sep ks[j] "=" val[p, ks[j]] }
                print p, out } }' "$@" 2>/dev/null; } | grep -v '^$' > $X/appoec.tmp
     chmod 644 $X/appoec.tmp 2>/dev/null; mv -f $X/appoec.tmp $X/appoec
     # 自定义 CSS：内置的先放，用户的同名盖掉

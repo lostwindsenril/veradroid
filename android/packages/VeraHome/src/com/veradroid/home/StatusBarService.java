@@ -115,7 +115,7 @@ public class StatusBarService extends Service {
             int p = -1;
             try {
                 BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
-                p = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                p = Math.min(100, bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY));
             } catch (Throwable ignored) { }
             String battText = p >= 0 ? p + "%" : "";
             if (!battText.equals(String.valueOf(batt.getText()))) batt.setText(battText);
